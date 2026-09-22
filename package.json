@@ -1,0 +1,10 @@
+{
+  "name": "dsh-summarized-session",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Summarized working memory for DSH: protocol implementation and integration design in progress.",
+  "type": "module",
+  "engines": { "node": ">=24.0.0" },
+  "repository": { "type": "git", "url": "git+https://github.com/Ri0n72Y/dsh-summarized-session.git" },
+  "scripts": { "test": "node --test tests/*.test.mjs" }
+}
