@@ -1,10 +1,42 @@
 {
   "name": "dsh-summarized-session",
-  "version": "0.0.0",
+  "version": "0.1.0-alpha.0",
   "private": true,
-  "description": "Summarized working memory for DSH: protocol implementation and integration design in progress.",
+  "description": "Summarized working memory for DSH 0.1.7-alpha.1.",
   "type": "module",
   "engines": { "node": ">=24.0.0" },
   "repository": { "type": "git", "url": "git+https://github.com/Ri0n72Y/dsh-summarized-session.git" },
-  "scripts": { "test": "node --test tests/*.test.mjs" }
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/index.d.ts", "import": "./lib/index.js" },
+    "./client": { "types": "./lib/client.d.ts", "import": "./lib/client.js" }
+  },
+  "files": ["lib", "src/prompts/final-response.json", "README.md"],
+  "scripts": {
+    "build": "tsdown",
+    "prepare": "npm run build",
+    "test": "node --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "0.1.7-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.1.7-alpha.1",
+    "@deepseek-ai/dsh-session": "0.1.7-alpha.1",
+    "@deepseek-ai/dsh-system-prompt": "0.1.7-alpha.1",
+    "@deepseek-ai/schemastery": "0.1.7-alpha.1",
+    "react": ">=19"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "0.1.7-alpha.1",
+    "@deepseek-ai/dsh-agent": "0.1.7-alpha.1",
+    "@deepseek-ai/dsh-session": "0.1.7-alpha.1",
+    "@deepseek-ai/dsh-system-prompt": "0.1.7-alpha.1",
+    "@deepseek-ai/schemastery": "0.1.7-alpha.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "tsdown": "^0.15.0",
+    "typescript": "^5.9.0"
+  }
 }
