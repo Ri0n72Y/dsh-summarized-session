@@ -2,7 +2,7 @@ export { SummaryPanel, RecentChatsPanel } from './memory-panel.tsx'
 export type { MemoryPanelProps } from './memory-panel.tsx'
 export type { EditableMemory, WorkingMemoryClient } from './model.ts'
 export { parseRecentChatsEditor, recentChatsEditorValue } from './model.ts'
-export { isMemoryCommitEvent, projectAssistantBlocks, responseFromCommit, responseFromSnapshot } from './response.ts'
+export { projectAssistantBlocks } from './response.ts'
 export { RpcWorkingMemoryClient } from './transport.ts'
 export { RECENT_KIND, SUMMARY_KIND } from './tabs.tsx'
 

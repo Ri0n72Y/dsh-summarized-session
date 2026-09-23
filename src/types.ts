@@ -18,10 +18,21 @@ export interface MemorySnapshot extends WorkingMemory {
   revision: number
 }
 
+export interface PendingMemoryProposal extends WorkingMemory {
+  response: string
+  sourceAssistantSeq: SessionSeq
+}
+
+export interface CommittedResponse {
+  sourceAssistantSeq: SessionSeq
+  response: string
+}
+
 /** JSON-safe Host/Client snapshot returned by the Connection RPC. */
 export interface SessionMemorySnapshot extends MemorySnapshot {
   enabled: boolean
   memoryMessageSeq?: SessionSeq
-  lastResponse?: string
   lastError?: string
+  pending?: PendingMemoryProposal
+  committedResponses: CommittedResponse[]
 }

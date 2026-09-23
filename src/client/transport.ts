@@ -4,6 +4,14 @@ import type { SessionMemorySnapshot } from '../types.ts'
 import type { EditableMemory, WorkingMemoryClientController } from './model.ts'
 import { MEMORY_RPC_PREFIX } from '../rpc.ts'
 
+function chats(value: unknown): boolean {
+  return Array.isArray(value) && value.every(entry => typeof entry === 'object' && entry !== null
+    && !Array.isArray(entry)
+    && Object.keys(entry).length === 2
+    && typeof (entry as Record<string, unknown>).user === 'string'
+    && typeof (entry as Record<string, unknown>).assistant === 'string')
+}
+
 function snapshot(value: unknown): SessionMemorySnapshot {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('Host returned an invalid working-memory snapshot')
@@ -11,7 +19,18 @@ function snapshot(value: unknown): SessionMemorySnapshot {
   const candidate = value as Partial<SessionMemorySnapshot>
   if (typeof candidate.enabled !== 'boolean'
     || !Number.isSafeInteger(candidate.revision) || (candidate.revision as number) < 0
-    || typeof candidate.summary !== 'string' || !Array.isArray(candidate.recentChats)) {
+    || typeof candidate.summary !== 'string' || !chats(candidate.recentChats)
+    || !Array.isArray(candidate.committedResponses)
+    || candidate.committedResponses.some(entry => typeof entry !== 'object' || entry === null
+      || !Number.isSafeInteger(entry.sourceAssistantSeq) || entry.sourceAssistantSeq < 0
+      || typeof entry.response !== 'string')
+    || (candidate.pending !== undefined
+      && (typeof candidate.pending !== 'object'
+        || typeof candidate.pending.response !== 'string'
+        || typeof candidate.pending.summary !== 'string'
+        || !chats(candidate.pending.recentChats)
+        || !Number.isSafeInteger(candidate.pending.sourceAssistantSeq)
+        || candidate.pending.sourceAssistantSeq < 0))) {
     throw new Error('Host returned an invalid working-memory snapshot')
   }
   return candidate as SessionMemorySnapshot
@@ -20,6 +39,9 @@ function snapshot(value: unknown): SessionMemorySnapshot {
 export class RpcWorkingMemoryClient implements WorkingMemoryClientController {
   private readonly listeners = new Set<(snapshot: SessionMemorySnapshot) => void>()
   private current?: SessionMemorySnapshot
+  private refreshing?: Promise<SessionMemorySnapshot>
+  private draftKey?: string
+  private editable?: EditableMemory
   private running = false
   private readonly rpc: ClientConnectionRpc
   private readonly sessionId: SessionId
@@ -33,8 +55,17 @@ export class RpcWorkingMemoryClient implements WorkingMemoryClientController {
     return this.call('read', { sessionId: this.sessionId })
   }
 
-  save(expectedRevision: number, memory: EditableMemory): Promise<SessionMemorySnapshot> {
-    return this.call('save', { sessionId: this.sessionId, expectedRevision, memory })
+  save(
+    expectedRevision: number,
+    memory: EditableMemory,
+    expectedProposalSeq?: number,
+  ): Promise<SessionMemorySnapshot> {
+    return this.call('save', {
+      sessionId: this.sessionId,
+      expectedRevision,
+      memory,
+      ...(expectedProposalSeq === undefined ? {} : { expectedProposalSeq }),
+    })
   }
 
   subscribe(listener: (value: SessionMemorySnapshot) => void): () => void {
@@ -51,8 +82,30 @@ export class RpcWorkingMemoryClient implements WorkingMemoryClientController {
     this.running = running
   }
 
+  draft(value: SessionMemorySnapshot): EditableMemory {
+    const key = `${value.revision}:${value.pending?.sourceAssistantSeq ?? 'accepted'}`
+    if (this.draftKey !== key || this.editable === undefined) {
+      this.draftKey = key
+      this.editable = {
+        summary: value.pending?.summary ?? value.summary,
+        recentChats: structuredClone(value.pending?.recentChats ?? value.recentChats),
+      }
+    }
+    return structuredClone(this.editable)
+  }
+
+  updateDraft(value: SessionMemorySnapshot, change: Partial<EditableMemory>): EditableMemory {
+    this.editable = { ...this.draft(value), ...structuredClone(change) }
+    return this.draft(value)
+  }
+
   async refresh(): Promise<SessionMemorySnapshot> {
-    return this.read()
+    if (this.refreshing !== undefined) return this.refreshing
+    const request = this.read().finally(() => {
+      if (this.refreshing === request) this.refreshing = undefined
+    })
+    this.refreshing = request
+    return request
   }
 
   private async call(endpoint: 'read' | 'save', payload: unknown): Promise<SessionMemorySnapshot> {
@@ -65,6 +118,7 @@ export class RpcWorkingMemoryClient implements WorkingMemoryClientController {
 
   private publish(value: SessionMemorySnapshot): void {
     this.current = value
+    this.draft(value)
     for (const listener of [...this.listeners]) listener(value)
   }
 }

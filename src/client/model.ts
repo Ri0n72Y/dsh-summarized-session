@@ -8,9 +8,15 @@ export interface EditableMemory {
 /** Thin transport boundary; the DSH client adapter supplies the current Session id. */
 export interface WorkingMemoryClient {
   read(): Promise<SessionMemorySnapshot>
-  save(expectedRevision: number, memory: EditableMemory): Promise<SessionMemorySnapshot>
+  save(
+    expectedRevision: number,
+    memory: EditableMemory,
+    expectedProposalSeq?: number,
+  ): Promise<SessionMemorySnapshot>
   subscribe(listener: (snapshot: SessionMemorySnapshot) => void): () => void
   isRunning(): boolean
+  draft(snapshot: SessionMemorySnapshot): EditableMemory
+  updateDraft(snapshot: SessionMemorySnapshot, change: Partial<EditableMemory>): EditableMemory
 }
 
 export interface WorkingMemoryClientController extends WorkingMemoryClient {

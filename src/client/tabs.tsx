@@ -21,16 +21,17 @@ const RECENT_ID = 'dsh-summarized-session/recent-chats'
 type TabProps = PropsRuntime<'sidebar.right.pane.tab'>
 type HeaderProps = PropsRuntime<'conversation.session.header.actions'>
 type AssistantProps = ChatNodeViewProps<'assistant-step'> & InjectFace<PresentationInjected>
+type ClientForSession = (sessionId: AssistantProps['sessionId']) => RpcWorkingMemoryClient
 
-function useRemoteMemory(ctx: Context, props: TabProps): {
+function useRemoteMemory(getClient: ClientForSession, props: TabProps): {
   client: RpcWorkingMemoryClient
   initial?: SessionMemorySnapshot
   error?: string
   running: boolean
 } {
   const client = useMemo(
-    () => new RpcWorkingMemoryClient(ctx.connection.rpc, props.sessionId),
-    [ctx, props.sessionId],
+    () => getClient(props.sessionId),
+    [getClient, props.sessionId],
   )
   const running = props.useSession(value => value.running)
   const session = props.useSession(value => value)
@@ -49,8 +50,11 @@ function useRemoteMemory(ctx: Context, props: TabProps): {
   return { client, initial, error, running }
 }
 
-function MemoryBody({ ctx, mode, ...props }: TabProps & { ctx: Context; mode: 'summary' | 'recent' }): ReactNode {
-  const remote = useRemoteMemory(ctx, props)
+function MemoryBody({ getClient, mode, ...props }: TabProps & {
+  getClient: ClientForSession
+  mode: 'summary' | 'recent'
+}): ReactNode {
+  const remote = useRemoteMemory(getClient, props)
   if (remote.error !== undefined) return <div role="alert" style={{ padding: 12 }}>{remote.error}</div>
   if (remote.initial === undefined) return <div style={{ padding: 12, opacity: 0.65 }}>正在读取工作记忆…</div>
   if (!remote.initial.enabled) return <div style={{ padding: 12 }}>此 Session 未启用 Summarized Working Memory。</div>
@@ -59,15 +63,18 @@ function MemoryBody({ ctx, mode, ...props }: TabProps & { ctx: Context; mode: 's
     : <RecentChatsPanel client={remote.client} initial={remote.initial} running={remote.running} />
 }
 
-function MemoryActions({ ctx, ...props }: HeaderProps & { ctx: Context }): ReactNode {
+function MemoryActions({ ctx, getClient, ...props }: HeaderProps & {
+  ctx: Context
+  getClient: ClientForSession
+}): ReactNode {
   const [enabled, setEnabled] = useState(false)
   const session = props.useSession(value => value)
   useEffect(() => {
     let active = true
-    const client = new RpcWorkingMemoryClient(ctx.connection.rpc, props.sessionId)
-    void client.read().then(value => { if (active) setEnabled(value.enabled) }, () => { if (active) setEnabled(false) })
+    const client = getClient(props.sessionId)
+    void client.refresh().then(value => { if (active) setEnabled(value.enabled) }, () => { if (active) setEnabled(false) })
     return () => { active = false }
-  }, [ctx, props.sessionId, session])
+  }, [getClient, props.sessionId, session])
   if (!enabled) return null
   return <div style={{ display: 'flex', gap: 6 }}>
     <button type="button" onClick={() => { ctx.sidebarRight.openTab(SUMMARY_KIND) }}>Summary</button>
@@ -75,22 +82,32 @@ function MemoryActions({ ctx, ...props }: HeaderProps & { ctx: Context }): React
   </div>
 }
 
-function responseRenderer(ctx: Context, Native: ComponentType<AssistantProps>): ComponentType<AssistantProps> {
+function responseRenderer(
+  getClient: ClientForSession,
+  Native: ComponentType<AssistantProps>,
+): ComponentType<AssistantProps> {
   return function SummarizedAssistant(props: AssistantProps): ReactNode {
-    const [enabled, setEnabled] = useState<boolean>()
+    const [snapshot, setSnapshot] = useState<SessionMemorySnapshot>()
     const session = props.useSession(value => value)
+    const client = useMemo(() => getClient(props.sessionId), [getClient, props.sessionId])
     useEffect(() => {
       let active = true
-      const client = new RpcWorkingMemoryClient(ctx.connection.rpc, props.sessionId)
-      void client.read().then(value => { if (active) setEnabled(value.enabled) }, () => { if (active) setEnabled(false) })
-      return () => { active = false }
-    }, [props.sessionId, session])
+      const unsubscribe = client.subscribe(value => { if (active) setSnapshot(value) })
+      void client.refresh().catch(() => {
+        if (active) setSnapshot({
+          enabled: false, revision: 0, summary: '', recentChats: [], committedResponses: [],
+        })
+      })
+      return () => { active = false; unsubscribe() }
+    }, [client, session])
     // Do not briefly expose the raw JSON envelope while the Session capability
     // check is in flight. Ordinary Sessions resume their native renderer as
     // soon as the Host reports `enabled: false`.
-    if (enabled === undefined) return null
-    if (!enabled || props.node.data.status === 'running') return createElement(Native, props)
-    const blocks = projectAssistantBlocks(props.node.data.blocks)
+    if (snapshot === undefined) return null
+    if (!snapshot.enabled || props.node.data.status === 'running') return createElement(Native, props)
+    const response = snapshot.committedResponses
+      .find(entry => entry.sourceAssistantSeq === props.node.anchorSeq)?.response
+    const blocks = projectAssistantBlocks(props.node.data.blocks, response)
     if (blocks === props.node.data.blocks) return createElement(Native, props)
     return createElement(Native, {
       ...props,
@@ -100,6 +117,15 @@ function responseRenderer(ctx: Context, Native: ComponentType<AssistantProps>): 
 }
 
 export function registerClientSurfaces(ctx: Context): void {
+  const clients = new Map<AssistantProps['sessionId'], RpcWorkingMemoryClient>()
+  const getClient: ClientForSession = (sessionId) => {
+    let client = clients.get(sessionId)
+    if (client === undefined) {
+      client = new RpcWorkingMemoryClient(ctx.connection.rpc, sessionId)
+      clients.set(sessionId, client)
+    }
+    return client
+  }
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id: SUMMARY_ID, kind: SUMMARY_KIND, title: () => 'Summary', keepMounted: true,
   }), 'summarized-working-memory: Summary tab type')
@@ -110,17 +136,17 @@ export function registerClientSurfaces(ctx: Context): void {
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', function* () {
     yield ctx.slots.register(
       { name: 'sidebar.right.pane.tab', key: SUMMARY_ID },
-      (props: TabProps) => <MemoryBody {...props} ctx={ctx} mode="summary" />,
+      (props: TabProps) => <MemoryBody {...props} getClient={getClient} mode="summary" />,
     )
     yield ctx.slots.register(
       { name: 'sidebar.right.pane.tab', key: RECENT_ID },
-      (props: TabProps) => <MemoryBody {...props} ctx={ctx} mode="recent" />,
+      (props: TabProps) => <MemoryBody {...props} getClient={getClient} mode="recent" />,
     )
   }), 'summarized-working-memory: tab bodies')
 
   ctx.effect(() => ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register(
     { name: 'conversation.session.header.actions', id: 'summarized-working-memory', order: 40 },
-    (props: HeaderProps) => <MemoryActions {...props} ctx={ctx} />,
+    (props: HeaderProps) => <MemoryActions {...props} ctx={ctx} getClient={getClient} />,
   )), 'summarized-working-memory: header actions')
 
   ctx.effect(() => ctx.slots.inject('conversation.chat.node', () => {
@@ -143,7 +169,7 @@ export function registerClientSurfaces(ctx: Context): void {
         ...(nativeLocale === undefined ? {} : { locale: nativeLocale }),
         ...(nativeInject === undefined ? {} : { inject: nativeInject }),
       },
-      responseRenderer(ctx, native as ComponentType<AssistantProps>),
+      responseRenderer(getClient, native as ComponentType<AssistantProps>),
     )
   }), 'summarized-working-memory: response renderer')
 }

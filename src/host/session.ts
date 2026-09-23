@@ -10,14 +10,19 @@ import {
   proposeCompletion,
   workingMemoryText,
 } from './protocol.ts'
-import type { MemorySnapshot, SessionMemorySnapshot, WorkingMemory } from '../types.ts'
+import type {
+  CommittedResponse,
+  MemorySnapshot,
+  PendingMemoryProposal,
+  SessionMemorySnapshot,
+  WorkingMemory,
+} from '../types.ts'
 
 export const MEMORY_SOURCE_KIND = 'summarized-working-memory'
 
 export interface MemorySource {
   kind: typeof MEMORY_SOURCE_KIND
   revision: number
-  surfaceStartSeq?: SessionSeq
 }
 
 interface TurnState {
@@ -26,9 +31,18 @@ interface TurnState {
   stopping: boolean
 }
 
-interface LiveState extends SessionMemorySnapshot {
+interface PendingProposal extends PendingMemoryProposal {
+  expectedRevision: number
+  surfaceStartSeq: SessionSeq
+}
+
+interface LiveState extends MemorySnapshot {
+  memoryMessageSeq?: SessionSeq
+  lastError?: string
   /** First durable surface node covered by the next successful commit. */
   surfaceStartSeq?: SessionSeq
+  pending?: PendingProposal
+  responses: Map<SessionSeq, string>
   turns: Map<number, TurnState>
 }
 
@@ -49,6 +63,14 @@ declare module '@deepseek-ai/dsh-session/types' {
       response: string
       sourceAssistantSeq: SessionSeq
       memoryMessageSeq: SessionSeq
+    }
+    'summarized-working-memory/proposal': {
+      expectedRevision: number
+      summary: string
+      recentChats: WorkingMemory['recentChats']
+      response: string
+      sourceAssistantSeq: SessionSeq
+      surfaceStartSeq: SessionSeq
     }
     'summarized-working-memory/edit': {
       revision: number
@@ -71,8 +93,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function memorySource(value: unknown): MemorySource | undefined {
   if (!isRecord(value) || value.kind !== MEMORY_SOURCE_KIND) return undefined
   if (!Number.isSafeInteger(value.revision) || (value.revision as number) < 0) return undefined
-  if (value.surfaceStartSeq !== undefined
-    && (!Number.isSafeInteger(value.surfaceStartSeq) || (value.surfaceStartSeq as number) < 0)) return undefined
   return value as unknown as MemorySource
 }
 
@@ -83,7 +103,7 @@ function textContent(message: { content: readonly unknown[] }): string {
   }).join('')
 }
 
-function createMemoryMessage(memory: MemorySnapshot, surfaceStartSeq?: SessionSeq): UserMessage {
+function createMemoryMessage(memory: MemorySnapshot): UserMessage {
   const visibleMemory: WorkingMemory = {
     summary: memory.summary,
     recentChats: memory.recentChats,
@@ -94,35 +114,59 @@ function createMemoryMessage(memory: MemorySnapshot, surfaceStartSeq?: SessionSe
     source: {
       kind: MEMORY_SOURCE_KIND,
       revision: memory.revision,
-      ...(surfaceStartSeq === undefined ? {} : { surfaceStartSeq }),
     },
     content: [{ type: 'text', text: workingMemoryText(visibleMemory, Number.MAX_SAFE_INTEGER) }],
   }
 }
 
-function readPersistedMemory(session: Session, limit: number): SessionMemorySnapshot {
-  const messages = session.deriveMessages()
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message?.role !== 'user') continue
-    const source = memorySource(message.source)
+function readPersistedMemory(session: Session, limit: number): Omit<LiveState, 'turns'> {
+  let accepted: MemorySnapshot & { memoryMessageSeq?: SessionSeq; surfaceStartSeq?: SessionSeq } = {
+    revision: 0, summary: '', recentChats: [],
+  }
+  for (let index = session.surface.nodes.length - 1; index >= 0; index -= 1) {
+    const seq = session.surface.nodes[index]
+    if (seq === undefined) continue
+    const event = session.eventAt(seq)
+    if (event?.type !== 'user/message') continue
+    const source = memorySource(event.data.source)
     if (source === undefined) continue
-    const memory = parseWorkingMemoryText(textContent(message), limit)
-    return {
+    const memory = parseWorkingMemoryText(textContent(event.data), limit)
+    accepted = {
       revision: source.revision,
       summary: memory.summary,
       recentChats: memory.recentChats,
-      ...(source.surfaceStartSeq === undefined ? {} : {
-        memoryMessageSeq: source.surfaceStartSeq,
-        surfaceStartSeq: source.surfaceStartSeq,
-      }),
+      memoryMessageSeq: seq,
+      surfaceStartSeq: seq,
+    }
+    break
+  }
+
+  let pending: PendingProposal | undefined
+  const responses = new Map<SessionSeq, string>()
+  for (const event of session.snapshotEvents()) {
+    if (event.type === 'summarized-working-memory/proposal') {
+      pending = { ...event.data, recentChats: structuredClone(event.data.recentChats) }
+    } else if (event.type === 'summarized-working-memory/commit') {
+      responses.set(event.data.sourceAssistantSeq, event.data.response)
+      if (pending?.sourceAssistantSeq === event.data.sourceAssistantSeq) pending = undefined
     }
   }
-  return { revision: 0, summary: '', recentChats: [] }
+  return {
+    ...accepted,
+    ...(pending === undefined ? {} : { pending }),
+    responses,
+  }
 }
 
 function assistantRaw(event: SessionEvent<'assistant/message'>): string {
   return textContent(event.data.message)
+}
+
+function replacementSources(session: Session, startSeq: SessionSeq, endSeq: SessionSeq): SessionSeq[] {
+  const start = session.surface.nodes.indexOf(startSeq)
+  const end = session.surface.nodes.indexOf(endSeq)
+  if (start < 0 || end < start) throw new Error('Working-memory replacement range is no longer present')
+  return session.surface.nodes.slice(start, end + 1)
 }
 
 /**
@@ -150,7 +194,7 @@ export class SessionMemoryController {
       if (this.enabled(agent.session)) this.ensure(agent.session)
     })
 
-    this.ctx.on('agent/pre-step', async ({ agent, turn, step }, next): Promise<PreStepDecision> => {
+    this.ctx.on('agent/pre-step', async ({ agent, messages: claimed, turn, step }, next): Promise<PreStepDecision> => {
       const decision = await next()
       if (decision.kind === 'reject') return decision
       if (!this.enabled(agent.session)) return decision
@@ -163,28 +207,12 @@ export class SessionMemoryController {
       if (currentTurn !== undefined) currentTurn.stopping = false
       if (state.memoryMessageSeq !== undefined) return decision
 
-      // `decision.messages` is request-only: adding a message there does not
-      // append a Session event. Remember the durable current-input node as the
-      // initial replacement boundary, then inject the empty memory only into
-      // the model request. The first successful completion replaces from that
-      // boundary with the first durable memory node.
-      if (state.surfaceStartSeq === undefined) {
-        const messages = agent.session.deriveMessages()
-        const inputIndex = messages.findLastIndex(message => message.role === 'user')
-        const inputSeq = inputIndex < 0 ? undefined : agent.session.surface.nodes[inputIndex]
-        if (inputSeq === undefined) {
-          throw new Error('summarized-working-memory: accepted step has no durable user input boundary')
-        }
-        state.surfaceStartSeq = inputSeq
-      }
-
-      // Preserve DSH-owned context messages before the memory node. Replacing
-      // from this node at completion then drops only covered working history.
-      // The accepted current input is the last user-role item. DSH-owned
-      // instruction/catalog/context messages precede it and stay outside the
-      // replaceable range even when their source kinds are extension-defined.
-      const insertion = decision.messages.findLastIndex(message => message.role === 'user')
-      const index = insertion < 0 ? decision.messages.length : insertion
+      // `decision.messages` are durably appended by the Agent loop. Insert the
+      // memory immediately before the first claimed inbox message; assembled
+      // runtime context may also use the user role and is not an input boundary.
+      const claimedIds = new Set(claimed.map(message => message.id))
+      const insertion = decision.messages.findIndex(message => claimedIds.has(message.id))
+      const index = insertion < 0 ? 0 : insertion
       return {
         ...decision,
         messages: [
@@ -202,6 +230,7 @@ export class SessionMemoryController {
         const source = memorySource(event.data.source)
         if (source === undefined) return
         state.memoryMessageSeq = event.seq
+        if (state.surfaceStartSeq === undefined) state.surfaceStartSeq = event.seq
         return
       }
       if (event.type === 'assistant/message') {
@@ -228,7 +257,7 @@ export class SessionMemoryController {
 
   snapshot(session: Session): SessionMemorySnapshot {
     if (!this.enabled(session)) {
-      return { enabled: false, revision: 0, summary: '', recentChats: [] }
+      return { enabled: false, revision: 0, summary: '', recentChats: [], committedResponses: [] }
     }
     const state = this.ensure(session)
     return {
@@ -236,34 +265,93 @@ export class SessionMemoryController {
       revision: state.revision,
       summary: state.summary,
       recentChats: structuredClone(state.recentChats),
+      committedResponses: [...state.responses].map(([sourceAssistantSeq, response]): CommittedResponse => ({
+        sourceAssistantSeq, response,
+      })),
       ...(state.memoryMessageSeq === undefined ? {} : { memoryMessageSeq: state.memoryMessageSeq }),
-      ...(state.lastResponse === undefined ? {} : { lastResponse: state.lastResponse }),
       ...(state.lastError === undefined ? {} : { lastError: state.lastError }),
+      ...(state.pending === undefined ? {} : {
+        pending: {
+          response: state.pending.response,
+          summary: state.pending.summary,
+          recentChats: structuredClone(state.pending.recentChats),
+          sourceAssistantSeq: state.pending.sourceAssistantSeq,
+        },
+      }),
     }
   }
 
-  edit(agent: Agent, expectedRevision: number, value: unknown): SessionMemorySnapshot {
+  edit(
+    agent: Agent,
+    expectedRevision: number,
+    value: unknown,
+    expectedProposalSeq?: number,
+  ): SessionMemorySnapshot {
     if (!this.enabled(agent.session)) throw new Error('Summarized working memory is not enabled for this session')
     if (agent.status !== 'idle') throw new Error('Working memory can only be edited while the agent is idle')
     const session = agent.session
     const state = this.ensure(session)
     if (state.revision !== expectedRevision) throw new Error('Working memory changed before the edit was saved')
+    const edited = parseMemoryEdit(value, this.recentChatLimit)
+    if (state.pending !== undefined) {
+      const pending = state.pending
+      if (expectedProposalSeq !== pending.sourceAssistantSeq) {
+        throw new Error('Working-memory proposal changed before it was accepted')
+      }
+      if (pending.expectedRevision !== expectedRevision) {
+        throw new Error('Working-memory proposal no longer matches the accepted revision')
+      }
+      if (session.surface.nodes.at(-1) !== pending.sourceAssistantSeq) {
+        throw new Error('Cannot accept memory after new conversation history was appended')
+      }
+      const next: MemorySnapshot = {
+        revision: state.revision + 1,
+        summary: edited.summary,
+        recentChats: edited.recentChats,
+      }
+      const sources = replacementSources(
+        session, pending.surfaceStartSeq, pending.sourceAssistantSeq,
+      )
+      const event = session.append('user/message', createMemoryMessage(next), {
+        surfaceOp: {
+          op: 'replace',
+          startSeq: pending.surfaceStartSeq,
+          endSeq: pending.sourceAssistantSeq,
+        },
+        sourceEventSeqs: sources,
+      })
+      session.append('summarized-working-memory/commit', {
+        revision: next.revision,
+        summary: next.summary,
+        recentChats: next.recentChats,
+        response: pending.response,
+        sourceAssistantSeq: pending.sourceAssistantSeq,
+        memoryMessageSeq: event.seq,
+      })
+      state.responses.set(pending.sourceAssistantSeq, pending.response)
+      Object.assign(state, next, {
+        memoryMessageSeq: event.seq,
+        surfaceStartSeq: event.seq,
+        pending: undefined,
+        lastError: undefined,
+      })
+      return this.snapshot(session)
+    }
+    if (expectedProposalSeq !== undefined) throw new Error('Working-memory proposal is no longer pending')
     if (state.memoryMessageSeq === undefined || state.surfaceStartSeq === undefined) {
       throw new Error('Working memory has not entered the session surface')
     }
     if (session.surface.nodes.at(-1) !== state.surfaceStartSeq) {
       throw new Error('Cannot edit memory while unfinished conversation history is present')
     }
-    const edited = parseMemoryEdit(value, this.recentChatLimit)
     const next: MemorySnapshot = {
       revision: state.revision + 1,
       summary: edited.summary,
       recentChats: edited.recentChats,
     }
-    const memorySeq = session.seq
-    const message = createMemoryMessage(next, memorySeq)
-    const event = session.append('user/message', message, {
+    const event = session.append('user/message', createMemoryMessage(next), {
       surfaceOp: { op: 'replace', startSeq: state.memoryMessageSeq, endSeq: state.memoryMessageSeq },
+      sourceEventSeqs: [state.memoryMessageSeq],
     })
     session.append('summarized-working-memory/edit', {
       revision: next.revision,
@@ -299,23 +387,17 @@ export class SessionMemoryController {
 
     try {
       const completion = proposeCompletion(state, turn.expectedRevision, assistantRaw(assistant), this.recentChatLimit)
-      const memorySeq = session.seq
-      const message = createMemoryMessage(completion.next, memorySeq)
-      const event = session.append('user/message', message, {
-        surfaceOp: { op: 'replace', startSeq: state.surfaceStartSeq, endSeq: assistant.seq },
-      })
-      session.append('summarized-working-memory/commit', {
-        revision: completion.next.revision,
+      const pending: PendingProposal = {
+        expectedRevision: turn.expectedRevision,
         summary: completion.next.summary,
         recentChats: completion.next.recentChats,
         response: completion.response,
         sourceAssistantSeq: assistant.seq,
-        memoryMessageSeq: event.seq,
-      })
-      Object.assign(state, completion.next, {
-        memoryMessageSeq: event.seq,
-        surfaceStartSeq: event.seq,
-        lastResponse: completion.response,
+        surfaceStartSeq: state.surfaceStartSeq,
+      }
+      session.append('summarized-working-memory/proposal', pending)
+      Object.assign(state, {
+        pending,
         lastError: undefined,
       })
     } catch (error: unknown) {

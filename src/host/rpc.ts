@@ -41,12 +41,17 @@ export function registerMemoryRpc(ctx: Context, memory: SummarizedWorkingMemory)
           if (!Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision as number) < 0) {
             throw new Error('expectedRevision must be a non-negative safe integer')
           }
+          if (input.expectedProposalSeq !== undefined
+            && (!Number.isSafeInteger(input.expectedProposalSeq) || (input.expectedProposalSeq as number) < 0)) {
+            throw new Error('expectedProposalSeq must be a non-negative safe integer when present')
+          }
           return {
             ok: true,
             value: memory.editById(
               sessionId(input.sessionId),
               input.expectedRevision as number,
               input.memory,
+              input.expectedProposalSeq as number | undefined,
             ),
           }
         }

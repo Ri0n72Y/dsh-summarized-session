@@ -44,6 +44,8 @@ class FakeSession {
       const end = this.surface.nodes.indexOf(endSeq)
       assert.notEqual(start, -1)
       assert.notEqual(end, -1)
+      const shadowed = this.surface.nodes.slice(start, end + 1)
+      assert.deepEqual(options.sourceEventSeqs, shadowed)
       this.surface.nodes.splice(start, end - start + 1, event.seq)
     } else if (['user/message', 'assistant/message'].includes(type)) {
       this.surface.nodes.push(event.seq)
@@ -59,6 +61,9 @@ class FakeSession {
       return event.type === 'user/message' ? event.data : event.data.message
     })
   }
+
+  eventAt(seq) { return this.events[seq] }
+  snapshotEvents() { return [...this.events] }
 }
 
 const text = value => [{ type: 'text', text: value }]
@@ -74,14 +79,18 @@ function assistantEnvelope(turn, summary = `状态 ${turn}`) {
 
 async function runTurn(ctx, session, agent, turn, raw) {
   const current = user(`输入 ${turn}`)
-  session.append('user/message', current)
+  const needsMemory = !session.deriveMessages().some(message => message.source.kind === MEMORY_SOURCE_KIND)
   const decision = await ctx.waterfall(
     'agent/pre-step',
-    { agent, turn, step: 1, signal: new AbortController().signal },
-    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
+    { agent, messages: [current], turn, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [current] }),
   )
-  assert.equal(decision.messages.at(-2)?.source.kind, MEMORY_SOURCE_KIND)
+  assert.equal(decision.kind, 'enter')
+  assert.equal(decision.messages[0]?.source.kind, needsMemory ? MEMORY_SOURCE_KIND : 'test')
   assert.equal(decision.messages.at(-1)?.source.kind, 'test')
+  for (const message of decision.messages) {
+    session.append('user/message', message, { surfaceOp: 'append' })
+  }
   session.append('assistant/message', {
     turn,
     step: 1,
@@ -95,7 +104,16 @@ async function runTurn(ctx, session, agent, turn, raw) {
   ctx.emit('agent/status', { agent, status: 'idle' })
 }
 
-test('successful turns replace covered history with one durable memory node', async () => {
+function acceptProposal(controller, agent) {
+  const snapshot = controller.snapshot(agent.session)
+  assert.ok(snapshot.pending)
+  return controller.edit(agent, snapshot.revision, {
+    summary: snapshot.pending.summary,
+    recentChats: snapshot.pending.recentChats,
+  }, snapshot.pending.sourceAssistantSeq)
+}
+
+test('successful turns require human acceptance before replacing covered history', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
   const agent = { session, status: 'idle' }
@@ -104,20 +122,29 @@ test('successful turns replace covered history with one durable memory node', as
   ctx.emit('agent/created', { agent, source: 'startup' })
 
   await runTurn(ctx, session, agent, 1, assistantEnvelope(1))
-  const snapshot = controller.snapshot(session)
+  const proposed = controller.snapshot(session)
+  assert.equal(proposed.revision, 0)
+  assert.equal(proposed.summary, '')
+  assert.equal(proposed.pending?.summary, '状态 1')
+  assert.equal(session.surface.nodes.length, 3)
+
+  const snapshot = acceptProposal(controller, agent)
   assert.equal(snapshot.revision, 1)
   assert.equal(snapshot.summary, '状态 1')
-  assert.equal(snapshot.lastResponse, '回复 1')
+  assert.equal(snapshot.committedResponses[0]?.response, '回复 1')
   assert.deepEqual(session.surface.nodes, [snapshot.memoryMessageSeq])
   const memory = session.deriveMessages()[0]
   assert.equal(memory.source.kind, MEMORY_SOURCE_KIND)
 
   await runTurn(ctx, session, agent, 2, assistantEnvelope(2))
+  assert.equal(controller.snapshot(session).revision, 1)
+  assert.equal(controller.snapshot(session).pending?.summary, '状态 2')
+  acceptProposal(controller, agent)
   assert.equal(controller.snapshot(session).revision, 2)
   assert.equal(session.surface.nodes.length, 1)
 })
 
-test('memory restores from the surface and an idle edit replaces it', async () => {
+test('a pending proposal restores and can be reviewed before acceptance', async () => {
   const firstContext = new FakeContext()
   const session = new FakeSession(firstContext)
   const agent = { session, status: 'idle' }
@@ -132,16 +159,25 @@ test('memory restores from the surface and an idle edit replaces it', async () =
   resumed.attach()
   resumedContext.emit('agent/created', { agent, source: 'resume' })
   const restored = resumed.snapshot(session)
-  assert.equal(restored.revision, 1)
-  assert.equal(restored.summary, '状态 1')
+  assert.equal(restored.revision, 0)
+  assert.equal(restored.summary, '')
+  assert.equal(restored.pending?.summary, '状态 1')
 
-  const edited = resumed.edit(agent, 1, {
+  const edited = resumed.edit(agent, 0, {
     summary: '用户修正',
     recentChats: [{ user: '修正请求', assistant: '用户手动修正了记忆' }],
-  })
-  assert.equal(edited.revision, 2)
+  }, restored.pending.sourceAssistantSeq)
+  assert.equal(edited.revision, 1)
   assert.equal(edited.summary, '用户修正')
   assert.deepEqual(session.surface.nodes, [edited.memoryMessageSeq])
+
+  const revised = resumed.edit(agent, 1, {
+    summary: '用户再次修正',
+    recentChats: edited.recentChats,
+  })
+  assert.equal(revised.revision, 2)
+  assert.equal(revised.summary, '用户再次修正')
+  assert.deepEqual(session.surface.nodes, [revised.memoryMessageSeq])
 })
 
 test('invalid final JSON preserves memory and unfinished raw history', async () => {
@@ -152,6 +188,7 @@ test('invalid final JSON preserves memory and unfinished raw history', async () 
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
   await runTurn(ctx, session, agent, 1, assistantEnvelope(1))
+  acceptProposal(controller, agent)
   const before = controller.snapshot(session)
 
   await runTurn(ctx, session, agent, 2, '{broken')
@@ -173,13 +210,14 @@ test('a tentative stop followed by same-turn steering does not compact early', a
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
 
-  session.append('user/message', user('最初输入'))
+  const firstInput = user('最初输入')
   const firstDecision = await ctx.waterfall(
     'agent/pre-step',
-    { agent, turn: 1, step: 1, signal: new AbortController().signal },
-    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
+    { agent, messages: [firstInput], turn: 1, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [firstInput] }),
   )
-  assert.equal(firstDecision.messages.at(-2)?.source.kind, MEMORY_SOURCE_KIND)
+  for (const message of firstDecision.messages) session.append('user/message', message, { surfaceOp: 'append' })
+  assert.equal(firstDecision.messages[0]?.source.kind, MEMORY_SOURCE_KIND)
   session.append('assistant/message', {
     turn: 1, step: 1, stream: [],
     message: { id: crypto.randomUUID(), role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1, '过早状态')) },
@@ -187,21 +225,25 @@ test('a tentative stop followed by same-turn steering does not compact early', a
   ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
   assert.equal(controller.snapshot(session).revision, 0)
 
-  session.append('user/message', user('同轮 steering'))
+  const steering = user('同轮 steering')
   const steered = await ctx.waterfall(
     'agent/pre-step',
-    { agent, turn: 1, step: 2, signal: new AbortController().signal },
-    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
+    { agent, messages: [steering], turn: 1, step: 2, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [steering] }),
   )
-  assert.equal(steered.messages.at(-2)?.source.kind, MEMORY_SOURCE_KIND)
+  for (const message of steered.messages) session.append('user/message', message, { surfaceOp: 'append' })
+  assert.equal(steered.messages[0]?.source.kind, 'test')
   session.append('assistant/message', {
     turn: 1, step: 2, stream: [],
     message: { id: crypto.randomUUID(), role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1, '最终状态')) },
   })
   ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
   ctx.emit('agent/status', { agent, status: 'idle' })
+  agent.status = 'idle'
+  assert.equal(controller.snapshot(session).pending?.summary, '最终状态')
+  assert.equal(controller.snapshot(session).revision, 0)
+  acceptProposal(controller, agent)
   assert.equal(controller.snapshot(session).summary, '最终状态')
-  assert.equal(controller.snapshot(session).revision, 1)
 })
 
 test('stable injected context stays before the replaceable memory boundary', async () => {
@@ -213,22 +255,24 @@ test('stable injected context stays before the replaceable memory boundary', asy
   ctx.emit('agent/created', { agent, source: 'startup' })
   const stable = { id: crypto.randomUUID(), role: 'user', source: { kind: 'agent-instructions' }, content: text('stable') }
   const current = user('current')
-  session.append('user/message', stable)
-  session.append('user/message', current)
+  session.append('user/message', stable, { surfaceOp: 'append' })
+  const runtimeContext = { ...user('runtime'), source: { kind: 'runtime-context' } }
   const decision = await ctx.waterfall(
     'agent/pre-step',
-    { agent, turn: 1, step: 1, signal: new AbortController().signal },
-    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
+    { agent, messages: [current], turn: 1, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [current, runtimeContext] }),
   )
-  assert.equal(decision.messages[0].source.kind, 'agent-instructions')
-  assert.equal(decision.messages[1].source.kind, MEMORY_SOURCE_KIND)
-  assert.equal(decision.messages[2].source.kind, 'test')
+  assert.equal(decision.messages[0].source.kind, MEMORY_SOURCE_KIND)
+  assert.equal(decision.messages[1].source.kind, 'test')
+  assert.equal(decision.messages[2].source.kind, 'runtime-context')
+  for (const message of decision.messages) session.append('user/message', message, { surfaceOp: 'append' })
   session.append('assistant/message', {
     turn: 1, step: 1, stream: [],
     message: { id: crypto.randomUUID(), role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1)) },
   })
   ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
   ctx.emit('agent/status', { agent, status: 'idle' })
+  acceptProposal(controller, agent)
   assert.equal(session.deriveMessages()[0].source.kind, 'agent-instructions')
   assert.equal(session.deriveMessages()[1].source.kind, MEMORY_SOURCE_KIND)
 })
@@ -241,14 +285,38 @@ test('disabled sessions remain untouched', async () => {
   const controller = new SessionMemoryController(ctx, 3, value => value.header.agentPreset === 'summarized-working-memory')
   controller.attach()
   const current = user('current')
-  session.append('user/message', current)
   const decision = await ctx.waterfall(
     'agent/pre-step',
-    { agent, turn: 1, step: 1, signal: new AbortController().signal },
-    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
+    { agent, messages: [current], turn: 1, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [current] }),
   )
   assert.deepEqual(decision.messages, [current])
   assert.deepEqual(controller.snapshot(session), {
-    enabled: false, revision: 0, summary: '', recentChats: [],
+    enabled: false, revision: 0, summary: '', recentChats: [], committedResponses: [],
   })
+})
+
+test('an unreviewed proposal never becomes accepted memory and can be superseded', async () => {
+  const ctx = new FakeContext()
+  const session = new FakeSession(ctx)
+  const agent = { session, status: 'idle' }
+  const controller = new SessionMemoryController(ctx, 3)
+  controller.attach()
+  ctx.emit('agent/created', { agent, source: 'startup' })
+  await runTurn(ctx, session, agent, 1, assistantEnvelope(1))
+  const first = controller.snapshot(session)
+  assert.equal(first.revision, 0)
+  assert.ok(first.pending)
+  await runTurn(ctx, session, agent, 2, assistantEnvelope(2))
+  const latest = controller.snapshot(session)
+  assert.equal(latest.revision, 0)
+  assert.equal(latest.summary, '')
+  assert.equal(latest.pending?.summary, '状态 2')
+  assert.equal(session.surface.nodes.length, 5)
+  assert.throws(() => controller.edit(agent, 0, {
+    summary: first.pending.summary,
+    recentChats: first.pending.recentChats,
+  }, first.pending.sourceAssistantSeq), /proposal changed/)
+  acceptProposal(controller, agent)
+  assert.equal(session.surface.nodes.length, 1)
 })

@@ -2,7 +2,7 @@
 
 DSH + Cordis 的 SummarizedWorkingMemory 插件开发仓库。
 
-每轮以 **Summary + Recent Chats + 当前输入** 开始，轮内沿用正常工具调用历史，最终由同一次模型响应同时输出回复和新的工作记忆。
+每轮以 **Summary + Recent Chats + 当前输入** 开始，轮内沿用正常工具调用历史，最终由同一次模型响应同时提出回复和新的工作记忆。模型输出先进入待审核状态；用户可修改或清空，明确接受后才替换旧工作历史。
 
 **当前进度：协议核心、Host 轮次状态机、Connection RPC、两个原生右侧页、最终回复 renderer、独立 Agent 预设、bundle manifest 与 CI 均已实现。** 代码契约已对照 DSH `0.1.7-alpha.1` 对应源码，但尚未在发布包环境中安装、类型检查和联调，因此 `package.json` 继续设为 private，不声明已经兼容可用。
 
@@ -28,7 +28,7 @@ DSH + Cordis 的 SummarizedWorkingMemory 插件开发仓库。
 }
 ```
 
-Summary 同时吸收最近几轮的内容；Recent Chats 保留含本轮在内的最近 N 次压缩交互，更新 Summary 不会清空它。系统提示词、工具定义和环境描述不写进 Summary。
+Summary 同时吸收最近几轮的内容；Recent Chats 保留含本轮在内的最近 N 次压缩交互，更新 Summary 不会清空它。系统提示词、工具定义和环境描述不写进 Summary。AI 只负责提出更新，用户审核是 accepted Working Memory 的唯一入口；未审核时旧记忆与原始工作历史继续保留，后续提案可以覆盖较早提案。
 
 本阶段纯协议、Host 假 Session 状态机与 Client 数据模型测试无需安装依赖，使用 Node.js 24：
 
@@ -36,7 +36,7 @@ Summary 同时吸收最近几轮的内容；Recent Chats 保留含本轮在内�
 npm test
 ```
 
-当前 16 项测试覆盖：严格 JSON、最近 N 条、revision 冲突、首轮持久化边界、成功轮替换、重启恢复、空闲编辑、失败轮保留、`turn-stopping` 后继续同轮 steering 时不提前压缩、普通预设隔离、稳定上下文保留和 Client 回复投影。
+当前 17 项测试覆盖：严格 JSON、最近 N 条、revision 冲突、提案持久化、人工接受、合法 surface replacement、重启恢复、失败轮保留、未审核提案不成为 accepted memory、跨面板审核草稿、`turn-stopping` 后继续同轮 steering 时不提前压缩、普通预设隔离、稳定上下文保留和 Host accepted 回复投影。
 
 实际 DSH 环境中的下一步调试顺序：
 

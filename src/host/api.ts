@@ -32,8 +32,8 @@ export class SummarizedWorkingMemory extends Service {
     return this.controller.snapshot(session)
   }
 
-  edit(agent: Agent, expectedRevision: number, value: unknown): SessionMemorySnapshot {
-    return this.controller.edit(agent, expectedRevision, value)
+  edit(agent: Agent, expectedRevision: number, value: unknown, expectedProposalSeq?: number): SessionMemorySnapshot {
+    return this.controller.edit(agent, expectedRevision, value, expectedProposalSeq)
   }
 
   getById(sessionId: SessionId): SessionMemorySnapshot {
@@ -42,9 +42,14 @@ export class SummarizedWorkingMemory extends Service {
     return this.get(session)
   }
 
-  editById(sessionId: SessionId, expectedRevision: number, value: unknown): SessionMemorySnapshot {
+  editById(
+    sessionId: SessionId,
+    expectedRevision: number,
+    value: unknown,
+    expectedProposalSeq?: number,
+  ): SessionMemorySnapshot {
     const agent = this.ctx.agents.get(sessionId)
     if (agent === undefined) throw new Error(`Session has no active agent: ${sessionId}`)
-    return this.edit(agent, expectedRevision, value)
+    return this.edit(agent, expectedRevision, value, expectedProposalSeq)
   }
 }

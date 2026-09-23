@@ -5,6 +5,7 @@ Read README.md, docs/design.md and docs/implementation.md before changing it.
 
 - Preserve the user's simple design: one final JSON response, no auxiliary summarizer.
 - Summary is editable natural prose. Recent Chats is a bounded chronological user/assistant list, also reflected in Summary.
+- Model output is a pending proposal. Only an explicit human save accepts it and replaces covered history.
 - Keep full history within a tool turn; replace covered working history only between turns.
 - Use public DSH contracts; never fake upstream types or rewrite raw provider streams.
 - Keep Host/Client entry points as composition roots. Do not copy unrelated workspace-scope features.
