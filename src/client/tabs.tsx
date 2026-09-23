@@ -1,7 +1,7 @@
 import { createElement, useEffect, useMemo, useState } from 'react'
 import type { ComponentType, ReactNode } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-client-connection/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
@@ -33,8 +33,8 @@ function useRemoteMemory(getClient: ClientForSession, props: TabProps): {
     () => getClient(props.sessionId),
     [getClient, props.sessionId],
   )
-  const running = props.useSession(value => value.running)
-  const session = props.useSession(value => value)
+  const running = props.useSession((value: { running: boolean }) => value.running)
+  const session = props.useSession((value: unknown) => value)
   const [initial, setInitial] = useState<SessionMemorySnapshot>()
   const [error, setError] = useState<string>()
   useEffect(() => { client.setRunning(running) }, [client, running])
@@ -47,7 +47,12 @@ function useRemoteMemory(getClient: ClientForSession, props: TabProps): {
     })
     return () => { active = false }
   }, [client, session])
-  return { client, initial, error, running }
+  return {
+    client,
+    running,
+    ...(initial === undefined ? {} : { initial }),
+    ...(error === undefined ? {} : { error }),
+  }
 }
 
 function MemoryBody({ getClient, mode, ...props }: TabProps & {
@@ -68,7 +73,7 @@ function MemoryActions({ ctx, getClient, ...props }: HeaderProps & {
   getClient: ClientForSession
 }): ReactNode {
   const [enabled, setEnabled] = useState(false)
-  const session = props.useSession(value => value)
+  const session = props.useSession((value: unknown) => value)
   useEffect(() => {
     let active = true
     const client = getClient(props.sessionId)
@@ -88,7 +93,7 @@ function responseRenderer(
 ): ComponentType<AssistantProps> {
   return function SummarizedAssistant(props: AssistantProps): ReactNode {
     const [snapshot, setSnapshot] = useState<SessionMemorySnapshot>()
-    const session = props.useSession(value => value)
+    const session = props.useSession((value: unknown) => value)
     const client = useMemo(() => getClient(props.sessionId), [getClient, props.sessionId])
     useEffect(() => {
       let active = true
@@ -117,11 +122,13 @@ function responseRenderer(
 }
 
 export function registerClientSurfaces(ctx: Context): void {
+  const connection = ctx.get('connection') as ConnectionHandle | undefined
+  if (connection === undefined) throw new Error('summarized-working-memory: Connection service is unavailable')
   const clients = new Map<AssistantProps['sessionId'], RpcWorkingMemoryClient>()
   const getClient: ClientForSession = (sessionId) => {
     let client = clients.get(sessionId)
     if (client === undefined) {
-      client = new RpcWorkingMemoryClient(ctx.connection.rpc, sessionId)
+      client = new RpcWorkingMemoryClient(connection.rpc, sessionId)
       clients.set(sessionId, client)
     }
     return client
@@ -156,9 +163,11 @@ export function registerClientSurfaces(ctx: Context): void {
     if (typeof native !== 'function' && (typeof native !== 'object' || native === null)) {
       throw new Error('summarized-working-memory: native assistant renderer is unavailable')
     }
-    const nativeInject = nativeEntry?.inject as unknown as
-      ((sessionId: AssistantProps['sessionId']) => PresentationInjected) | undefined
+    const nativeInject = nativeEntry?.inject
     const nativeLocale = nativeEntry?.locale as 'chat' | undefined
+    if (nativeInject === undefined) {
+      throw new Error('summarized-working-memory: native assistant renderer injection is unavailable')
+    }
     return ctx.slots.register(
       {
         name: 'conversation.chat.node',
@@ -167,7 +176,7 @@ export function registerClientSurfaces(ctx: Context): void {
         // entry registered so unloading this plugin restores it automatically.
         priority: -100,
         ...(nativeLocale === undefined ? {} : { locale: nativeLocale }),
-        ...(nativeInject === undefined ? {} : { inject: nativeInject }),
+        inject: nativeInject,
       },
       responseRenderer(getClient, native as ComponentType<AssistantProps>),
     )

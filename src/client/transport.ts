@@ -118,7 +118,7 @@ export class RpcWorkingMemoryClient implements WorkingMemoryClientController {
   async refresh(): Promise<SessionMemorySnapshot> {
     if (this.refreshing !== undefined) return this.refreshing
     const request = this.read().finally(() => {
-      if (this.refreshing === request) this.refreshing = undefined
+      if (this.refreshing === request) delete this.refreshing
     })
     this.refreshing = request
     return request
