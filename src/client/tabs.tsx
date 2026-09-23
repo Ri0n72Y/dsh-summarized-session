@@ -21,6 +21,7 @@ const RECENT_ID = 'dsh-summarized-session/recent-chats'
 type TabProps = PropsRuntime<'sidebar.right.pane.tab'>
 type HeaderProps = PropsRuntime<'conversation.session.header.actions'>
 type AssistantProps = ChatNodeViewProps<'assistant-step'> & InjectFace<PresentationInjected>
+type AssistantRenderer = (props: AssistantProps) => ReactNode
 type ClientForSession = (sessionId: AssistantProps['sessionId']) => RpcWorkingMemoryClient
 
 function useRemoteMemory(getClient: ClientForSession, props: TabProps): {
@@ -90,7 +91,7 @@ function MemoryActions({ ctx, getClient, ...props }: HeaderProps & {
 function responseRenderer(
   getClient: ClientForSession,
   Native: ComponentType<AssistantProps>,
-): ComponentType<AssistantProps> {
+): AssistantRenderer {
   return function SummarizedAssistant(props: AssistantProps): ReactNode {
     const [snapshot, setSnapshot] = useState<SessionMemorySnapshot>()
     const session = props.useSession((value: unknown) => value)
@@ -189,7 +190,7 @@ export function registerClientSurfaces(ctx: Context): void {
         ...(nativeLocale === undefined ? {} : { locale: nativeLocale }),
         inject: nativeInject,
       },
-      responseRenderer(getClient, native as ComponentType<AssistantProps>) as typeof native,
+      responseRenderer(getClient, native as ComponentType<AssistantProps>),
     )
   }), 'summarized-working-memory: response renderer')
 }
