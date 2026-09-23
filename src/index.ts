@@ -1,29 +1,29 @@
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { finalResponsePrompt, validateLimit } from './host/protocol.ts'
+import { validateLimit } from './host/protocol.ts'
 import { SummarizedWorkingMemory } from './host/api.ts'
+
+export const PRESET_ID = 'summarized-working-memory'
 
 export interface Config {
   recentChatLimit?: number
+  presetId?: string
 }
 
-export const inject = ['sessions', 'systemPrompt']
+export const inject = ['agents', 'connection', 'sessions']
 
 export const Config: z<Config> = z.object({
   recentChatLimit: z.number().step(1).min(1).default(8),
+  presetId: z.string().default(PRESET_ID),
 })
 
 export function apply(ctx: Context, config: Config = {}): void {
   const recentChatLimit = config.recentChatLimit ?? 8
+  const presetId = config.presetId ?? PRESET_ID
   validateLimit(recentChatLimit)
-  ctx.systemPrompt.section({
-    name: 'summarized-working-memory:final-response',
-    order: 9_500,
-    text: finalResponsePrompt(recentChatLimit),
-    interpolate: false,
-  })
-  ctx.plugin(SummarizedWorkingMemory, recentChatLimit)
+  if (!presetId.trim()) throw new Error('presetId must be a nonempty string')
+  ctx.plugin(SummarizedWorkingMemory, recentChatLimit, presetId)
 }
 
 export { SummarizedWorkingMemory } from './host/api.ts'
-export type { SessionMemorySnapshot } from './host/session.ts'
+export type { SessionMemorySnapshot } from './types.ts'

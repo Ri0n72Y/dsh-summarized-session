@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   finalResponsePrompt, parseFinalResponse, parseMemoryEdit,
-  proposeCompletion, workingMemoryText,
+  parseWorkingMemoryText, proposeCompletion, workingMemoryText,
 } from '../src/host/protocol.ts'
 
 const entry = n => ({ user: `问题 ${n}`, assistant: `处理 ${n}，向用户报告了结果。` })
@@ -61,6 +61,8 @@ test('manual edits and a blank initial state are accepted without a summary temp
   assert.deepEqual(parseMemoryEdit(edited, 3), edited)
   const rendered = workingMemoryText(edited, 3)
   assert.deepEqual(JSON.parse(rendered.slice(rendered.indexOf('\n') + 1)), edited)
+  assert.deepEqual(parseWorkingMemoryText(rendered, 3), edited)
+  assert.throws(() => parseWorkingMemoryText(JSON.stringify(edited), 3))
 })
 
 test('the system prompt is stable, limits are explicit, and memory is not interpolated into it', () => {

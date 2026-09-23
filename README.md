@@ -4,7 +4,7 @@ DSH + Cordis 的 SummarizedWorkingMemory 插件开发仓库。
 
 每轮以 **Summary + Recent Chats + 当前输入** 开始，轮内沿用正常工具调用历史，最终由同一次模型响应同时输出回复和新的工作记忆。
 
-**当前进度：设计与协议核心已完成第一稿，Host / Client 接入未完成，尚不可作为 DSH 插件安装。** `package.json` 暂设为 private，不声明虚假的插件入口或兼容性实测状态。
+**当前进度：协议核心、Host 轮次状态机、Connection RPC、两个原生右侧页、最终回复 renderer、独立 Agent 预设、bundle manifest 与 CI 均已实现。** 代码契约已对照 DSH `0.1.7-alpha.1` 对应源码，但尚未在发布包环境中安装、类型检查和联调，因此 `package.json` 继续设为 private，不声明已经兼容可用。
 
 目标基线为 DSH `0.1.7-alpha.1`。接口调研基于上游提交 [`c36a83f`](https://github.com/deepseek-ai/deepseek-harness/tree/c36a83ff6bb95e3f82cf79f9be7c724270a8aa61)，不是对该版本全部发布产物的兼容认证。
 
@@ -12,6 +12,8 @@ DSH + Cordis 的 SummarizedWorkingMemory 插件开发仓库。
 - [实现约定与剩余任务](docs/implementation.md)
 - [内置 JSON 提示词](src/prompts/final-response.json)
 - [协议校验与状态更新核心](src/host/protocol.ts)
+- [Session 轮次与 surface 状态机](src/host/session.ts)
+- [Summary / Recent Chats 编辑面板](src/client/memory-panel.tsx)
 
 ```json
 {
@@ -28,10 +30,18 @@ DSH + Cordis 的 SummarizedWorkingMemory 插件开发仓库。
 
 Summary 同时吸收最近几轮的内容；Recent Chats 保留含本轮在内的最近 N 次压缩交互，更新 Summary 不会清空它。系统提示词、工具定义和环境描述不写进 Summary。
 
-本阶段协议测试无需安装依赖，使用 Node.js 24：
+本阶段纯协议、Host 假 Session 状态机与 Client 数据模型测试无需安装依赖，使用 Node.js 24：
 
 ```sh
 npm test
 ```
 
-后续采用 [dsh-workspace-scope](https://github.com/Ri0n72Y/dsh-workspace-scope) 的静态 bundle 结构：Host / Client 两个装配入口、`lib/` 构建输出、`prepare` 和 `cordis.patch.yml`。只参考项目形态，不复制其 `0.1.6-alpha.2` 接口与特有功能。
+当前 16 项测试覆盖：严格 JSON、最近 N 条、revision 冲突、首轮持久化边界、成功轮替换、重启恢复、空闲编辑、失败轮保留、`turn-stopping` 后继续同轮 steering 时不提前压缩、普通预设隔离、稳定上下文保留和 Client 回复投影。
+
+实际 DSH 环境中的下一步调试顺序：
+
+1. 安装 `package.json` 中的精确 alpha.1 依赖，先运行 `npm run typecheck` 与 `npm run build`，按发布声明修正 Host 的窄接口差异。
+2. 若发布声明与源码快照存在窄差异，只修正 Host/Client 薄适配，不改协议核心。
+3. 安装本地目录后选择 `Summarized Working Memory` 预设，运行两轮含工具调用的联调矩阵。
+
+构建采用 Host / preset ESM 与 DSH Client module-loader bundle 三个入口，输出到 `lib/`。Host 与 Client 使用独立 TypeScript 工程，避免两侧同名 Cordis 服务声明互相污染。安装补丁同时加入 Host coordinator 和 `summarized-working-memory` Agent 预设；Client 通过官方 Connection RPC、Sidebar slot 和原生 assistant renderer 注册点接入。

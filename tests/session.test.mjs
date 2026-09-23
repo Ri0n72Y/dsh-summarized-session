@@ -31,6 +31,7 @@ class FakeContext {
 class FakeSession {
   events = []
   surface = { nodes: [] }
+  header = { agentPreset: 'summarized-working-memory' }
 
   constructor(ctx) { this.ctx = ctx }
   get seq() { return this.events.length }
@@ -73,12 +74,14 @@ function assistantEnvelope(turn, summary = `状态 ${turn}`) {
 
 async function runTurn(ctx, session, agent, turn, raw) {
   const current = user(`输入 ${turn}`)
+  session.append('user/message', current)
   const decision = await ctx.waterfall(
     'agent/pre-step',
     { agent, turn, step: 1, signal: new AbortController().signal },
-    async () => ({ kind: 'enter', messages: [current] }),
+    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
   )
-  for (const message of decision.messages) session.append('user/message', message)
+  assert.equal(decision.messages.at(-2)?.source.kind, MEMORY_SOURCE_KIND)
+  assert.equal(decision.messages.at(-1)?.source.kind, 'test')
   session.append('assistant/message', {
     turn,
     step: 1,
@@ -170,12 +173,13 @@ test('a tentative stop followed by same-turn steering does not compact early', a
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
 
+  session.append('user/message', user('最初输入'))
   const firstDecision = await ctx.waterfall(
     'agent/pre-step',
     { agent, turn: 1, step: 1, signal: new AbortController().signal },
-    async () => ({ kind: 'enter', messages: [user('最初输入')] }),
+    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
   )
-  for (const message of firstDecision.messages) session.append('user/message', message)
+  assert.equal(firstDecision.messages.at(-2)?.source.kind, MEMORY_SOURCE_KIND)
   session.append('assistant/message', {
     turn: 1, step: 1, stream: [],
     message: { id: crypto.randomUUID(), role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1, '过早状态')) },
@@ -183,12 +187,13 @@ test('a tentative stop followed by same-turn steering does not compact early', a
   ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
   assert.equal(controller.snapshot(session).revision, 0)
 
+  session.append('user/message', user('同轮 steering'))
   const steered = await ctx.waterfall(
     'agent/pre-step',
     { agent, turn: 1, step: 2, signal: new AbortController().signal },
-    async () => ({ kind: 'enter', messages: [user('同轮 steering')] }),
+    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
   )
-  for (const message of steered.messages) session.append('user/message', message)
+  assert.equal(steered.messages.at(-2)?.source.kind, MEMORY_SOURCE_KIND)
   session.append('assistant/message', {
     turn: 1, step: 2, stream: [],
     message: { id: crypto.randomUUID(), role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1, '最终状态')) },
@@ -197,4 +202,53 @@ test('a tentative stop followed by same-turn steering does not compact early', a
   ctx.emit('agent/status', { agent, status: 'idle' })
   assert.equal(controller.snapshot(session).summary, '最终状态')
   assert.equal(controller.snapshot(session).revision, 1)
+})
+
+test('stable injected context stays before the replaceable memory boundary', async () => {
+  const ctx = new FakeContext()
+  const session = new FakeSession(ctx)
+  const agent = { session, status: 'idle' }
+  const controller = new SessionMemoryController(ctx, 3)
+  controller.attach()
+  ctx.emit('agent/created', { agent, source: 'startup' })
+  const stable = { id: crypto.randomUUID(), role: 'user', source: { kind: 'agent-instructions' }, content: text('stable') }
+  const current = user('current')
+  session.append('user/message', stable)
+  session.append('user/message', current)
+  const decision = await ctx.waterfall(
+    'agent/pre-step',
+    { agent, turn: 1, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
+  )
+  assert.equal(decision.messages[0].source.kind, 'agent-instructions')
+  assert.equal(decision.messages[1].source.kind, MEMORY_SOURCE_KIND)
+  assert.equal(decision.messages[2].source.kind, 'test')
+  session.append('assistant/message', {
+    turn: 1, step: 1, stream: [],
+    message: { id: crypto.randomUUID(), role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1)) },
+  })
+  ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
+  ctx.emit('agent/status', { agent, status: 'idle' })
+  assert.equal(session.deriveMessages()[0].source.kind, 'agent-instructions')
+  assert.equal(session.deriveMessages()[1].source.kind, MEMORY_SOURCE_KIND)
+})
+
+test('disabled sessions remain untouched', async () => {
+  const ctx = new FakeContext()
+  const session = new FakeSession(ctx)
+  session.header.agentPreset = 'standard'
+  const agent = { session, status: 'idle' }
+  const controller = new SessionMemoryController(ctx, 3, value => value.header.agentPreset === 'summarized-working-memory')
+  controller.attach()
+  const current = user('current')
+  session.append('user/message', current)
+  const decision = await ctx.waterfall(
+    'agent/pre-step',
+    { agent, turn: 1, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: session.deriveMessages() }),
+  )
+  assert.deepEqual(decision.messages, [current])
+  assert.deepEqual(controller.snapshot(session), {
+    enabled: false, revision: 0, summary: '', recentChats: [],
+  })
 })

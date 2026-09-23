@@ -13,7 +13,7 @@ Working Memory 本身只有 Summary 和 Recent Chats。当前用户输入是下�
 1. 从当前 Session 读取最后一次成功提交的记忆快照，以及用户已保存的编辑。首轮为空记忆。
 2. 建立本轮输入：DSH 的有效系统、工具与环境材料，加上 Summary → Recent Chats → 当前输入。附件和中途 steering 仍保留 DSH 原生消息结构。
 3. 轮内按原生 Agent loop 继续调用工具，每一步保留本轮已发生的 assistant / tool 消息。
-4. 无工具调用的最终回复完成后，解析整个 JSON；校验全部字段成功，才一起提交 Summary 与 Recent Chats，并显示 response。
+4. 无工具调用的最终回复完成后，先在 `turn-stopping` 标记候选提交；只有同轮没有新增 steering 且 Agent 真正进入 idle（或下一轮开始前已确认上一轮结束），才解析整个 JSON。校验全部字段成功后，一起提交 Summary 与 Recent Chats，并显示 response。
 5. 下一轮替换已被记忆覆盖的旧工作历史，不重复发送过去各轮的原始对话和工具结果。人类可查看的历史日志保留。
 
 JSON 字段由模型输出；Host 必须负责校验与持久化。仅在浏览器里解析、保存会造成关闭页面或后台运行时丢失记忆，因此 Client 只呈现 Host 接受的状态。

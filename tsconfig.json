@@ -1,17 +1,8 @@
 {
-  "compilerOptions": {
-    "target": "ES2024",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": true,
-    "verbatimModuleSyntax": true,
-    "jsx": "react-jsx",
-    "resolveJsonModule": true,
-    "allowImportingTsExtensions": true,
-    "noEmit": true,
-    "types": ["node", "react"]
-  },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tsdown.config.ts"]
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.host.json" },
+    { "path": "./tsconfig.client.json" },
+    { "path": "./tsconfig.build.json" }
+  ]
 }

@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "types": ["node"] },
+  "include": [
+    "src/index.ts",
+    "src/preset.ts",
+    "src/rpc.ts",
+    "src/types.ts",
+    "src/host/**/*.ts",
+    "src/prompts/**/*.json"
+  ]
+}

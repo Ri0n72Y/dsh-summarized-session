@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import type { SessionMemorySnapshot } from '../host/session.ts'
+import type { SessionMemorySnapshot } from '../types.ts'
 import type { WorkingMemoryClient } from './model.ts'
 import { parseRecentChatsEditor, recentChatsEditorValue } from './model.ts'
 
 export interface MemoryPanelProps {
   client: WorkingMemoryClient
   initial: SessionMemorySnapshot
+  running: boolean
 }
 
 const shell: CSSProperties = {
@@ -65,7 +66,7 @@ function useMemory(client: WorkingMemoryClient, initial: SessionMemorySnapshot) 
   return { snapshot, saving, error, save }
 }
 
-export function SummaryPanel({ client, initial }: MemoryPanelProps): ReactNode {
+export function SummaryPanel({ client, initial, running }: MemoryPanelProps): ReactNode {
   const memory = useMemory(client, initial)
   const [value, setValue] = useState(memory.snapshot.summary)
   useEffect(() => setValue(memory.snapshot.summary), [memory.snapshot.revision, memory.snapshot.summary])
@@ -76,13 +77,13 @@ export function SummaryPanel({ client, initial }: MemoryPanelProps): ReactNode {
       <div style={{ opacity: 0.65, fontSize: 12 }}>可编辑的总体工作状态；保存后从下一轮开始生效。</div>
     </div>
     <textarea aria-label="Summary 内容" style={editor} value={value} onChange={event => setValue(event.target.value)} />
-    <Footer revision={memory.snapshot.revision} busy={memory.saving || client.isRunning()} dirty={dirty}
+    <Footer revision={memory.snapshot.revision} busy={memory.saving || running} dirty={dirty}
       error={memory.error} onReset={() => setValue(memory.snapshot.summary)}
       onSave={() => void memory.save(value, memory.snapshot.recentChats)} />
   </section>
 }
 
-export function RecentChatsPanel({ client, initial }: MemoryPanelProps): ReactNode {
+export function RecentChatsPanel({ client, initial, running }: MemoryPanelProps): ReactNode {
   const memory = useMemory(client, initial)
   const canonical = useMemo(
     () => recentChatsEditorValue(memory.snapshot.recentChats),
@@ -112,7 +113,7 @@ export function RecentChatsPanel({ client, initial }: MemoryPanelProps): ReactNo
     <textarea aria-label="Recent Chats JSON" spellCheck={false}
       style={{ ...editor, fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace', fontSize: 12 }}
       value={value} onChange={event => setValue(event.target.value)} />
-    <Footer revision={memory.snapshot.revision} busy={memory.saving || client.isRunning()} dirty={dirty}
+    <Footer revision={memory.snapshot.revision} busy={memory.saving || running} dirty={dirty}
       error={parseError ?? memory.error} onReset={() => { setValue(canonical); setParseError(undefined) }} onSave={save} />
   </section>
 }

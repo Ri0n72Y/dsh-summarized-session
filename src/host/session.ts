@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type {
-  Session, SessionEvent, UserMessage,
+  Session, SessionEvent, SessionSeq, UserMessage,
 } from '@deepseek-ai/dsh-session'
 import {
   parseMemoryEdit,
@@ -10,20 +10,14 @@ import {
   proposeCompletion,
   workingMemoryText,
 } from './protocol.ts'
-import type { MemorySnapshot, WorkingMemory } from './protocol.ts'
+import type { MemorySnapshot, SessionMemorySnapshot, WorkingMemory } from '../types.ts'
 
 export const MEMORY_SOURCE_KIND = 'summarized-working-memory'
 
 export interface MemorySource {
   kind: typeof MEMORY_SOURCE_KIND
   revision: number
-  surfaceStartSeq?: number
-}
-
-export interface SessionMemorySnapshot extends MemorySnapshot {
-  memoryMessageSeq?: number
-  lastResponse?: string
-  lastError?: string
+  surfaceStartSeq?: SessionSeq
 }
 
 interface TurnState {
@@ -33,28 +27,38 @@ interface TurnState {
 }
 
 interface LiveState extends SessionMemorySnapshot {
+  /** First durable surface node covered by the next successful commit. */
+  surfaceStartSeq?: SessionSeq
   turns: Map<number, TurnState>
 }
 
-declare module '@deepseek-ai/dsh-session' {
+export type { SessionMemorySnapshot } from '../types.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'summarized-working-memory': MemorySource
+  }
+}
+
+declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     'summarized-working-memory/commit': {
       revision: number
       summary: string
       recentChats: WorkingMemory['recentChats']
       response: string
-      sourceAssistantSeq: number
-      memoryMessageSeq: number
+      sourceAssistantSeq: SessionSeq
+      memoryMessageSeq: SessionSeq
     }
     'summarized-working-memory/edit': {
       revision: number
       summary: string
       recentChats: WorkingMemory['recentChats']
-      memoryMessageSeq: number
+      memoryMessageSeq: SessionSeq
     }
     'summarized-working-memory/error': {
       turn: number
-      sourceAssistantSeq?: number
+      sourceAssistantSeq?: SessionSeq
       message: string
     }
   }
@@ -79,7 +83,7 @@ function textContent(message: { content: readonly unknown[] }): string {
   }).join('')
 }
 
-function createMemoryMessage(memory: MemorySnapshot, surfaceStartSeq?: number): UserMessage {
+function createMemoryMessage(memory: MemorySnapshot, surfaceStartSeq?: SessionSeq): UserMessage {
   const visibleMemory: WorkingMemory = {
     summary: memory.summary,
     recentChats: memory.recentChats,
@@ -108,7 +112,10 @@ function readPersistedMemory(session: Session, limit: number): SessionMemorySnap
       revision: source.revision,
       summary: memory.summary,
       recentChats: memory.recentChats,
-      ...(source.surfaceStartSeq === undefined ? {} : { memoryMessageSeq: source.surfaceStartSeq }),
+      ...(source.surfaceStartSeq === undefined ? {} : {
+        memoryMessageSeq: source.surfaceStartSeq,
+        surfaceStartSeq: source.surfaceStartSeq,
+      }),
     }
   }
   return { revision: 0, summary: '', recentChats: [] }
@@ -125,21 +132,28 @@ function assistantRaw(event: SessionEvent<'assistant/message'>): string {
 export class SessionMemoryController {
   private readonly states = new WeakMap<Session, LiveState>()
   private readonly ctx: Context
+  private readonly enabled: (session: Session) => boolean
   readonly recentChatLimit: number
 
-  constructor(ctx: Context, recentChatLimit: number) {
+  constructor(
+    ctx: Context,
+    recentChatLimit: number,
+    enabled: (session: Session) => boolean = () => true,
+  ) {
     this.ctx = ctx
     this.recentChatLimit = recentChatLimit
+    this.enabled = enabled
   }
 
   attach(): void {
     this.ctx.on('agent/created', ({ agent }) => {
-      this.ensure(agent.session)
+      if (this.enabled(agent.session)) this.ensure(agent.session)
     })
 
     this.ctx.on('agent/pre-step', async ({ agent, turn, step }, next): Promise<PreStepDecision> => {
       const decision = await next()
       if (decision.kind === 'reject') return decision
+      if (!this.enabled(agent.session)) return decision
       const state = this.ensure(agent.session)
       this.completeStoppedTurns(agent, turn)
       if (step === 1 && !state.turns.has(turn)) {
@@ -149,11 +163,35 @@ export class SessionMemoryController {
       if (currentTurn !== undefined) currentTurn.stopping = false
       if (state.memoryMessageSeq !== undefined) return decision
 
-      // The first memory message enters the accepted user batch, after DSH's
-      // system/runtime prefix and before the actual current input.
+      // `decision.messages` is request-only: adding a message there does not
+      // append a Session event. Remember the durable current-input node as the
+      // initial replacement boundary, then inject the empty memory only into
+      // the model request. The first successful completion replaces from that
+      // boundary with the first durable memory node.
+      if (state.surfaceStartSeq === undefined) {
+        const messages = agent.session.deriveMessages()
+        const inputIndex = messages.findLastIndex(message => message.role === 'user')
+        const inputSeq = inputIndex < 0 ? undefined : agent.session.surface.nodes[inputIndex]
+        if (inputSeq === undefined) {
+          throw new Error('summarized-working-memory: accepted step has no durable user input boundary')
+        }
+        state.surfaceStartSeq = inputSeq
+      }
+
+      // Preserve DSH-owned context messages before the memory node. Replacing
+      // from this node at completion then drops only covered working history.
+      // The accepted current input is the last user-role item. DSH-owned
+      // instruction/catalog/context messages precede it and stay outside the
+      // replaceable range even when their source kinds are extension-defined.
+      const insertion = decision.messages.findLastIndex(message => message.role === 'user')
+      const index = insertion < 0 ? decision.messages.length : insertion
       return {
         ...decision,
-        messages: [createMemoryMessage(state), ...decision.messages],
+        messages: [
+          ...decision.messages.slice(0, index),
+          createMemoryMessage(state),
+          ...decision.messages.slice(index),
+        ],
       }
     })
 
@@ -173,14 +211,14 @@ export class SessionMemoryController {
     })
 
     this.ctx.on('agent/turn-stopping', ({ agent, turn, signal }) => {
-      if (signal.aborted) return
+      if (signal.aborted || !this.enabled(agent.session)) return
       const state = this.ensure(agent.session)
       const current = state.turns.get(turn)
       if (current !== undefined) current.stopping = true
     })
 
     this.ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle') this.completeStoppedTurns(agent)
+      if (status === 'idle' && this.enabled(agent.session)) this.completeStoppedTurns(agent)
     })
 
     this.ctx.on('agent/error', ({ agent, turn }) => {
@@ -189,8 +227,12 @@ export class SessionMemoryController {
   }
 
   snapshot(session: Session): SessionMemorySnapshot {
+    if (!this.enabled(session)) {
+      return { enabled: false, revision: 0, summary: '', recentChats: [] }
+    }
     const state = this.ensure(session)
     return {
+      enabled: true,
       revision: state.revision,
       summary: state.summary,
       recentChats: structuredClone(state.recentChats),
@@ -201,12 +243,15 @@ export class SessionMemoryController {
   }
 
   edit(agent: Agent, expectedRevision: number, value: unknown): SessionMemorySnapshot {
+    if (!this.enabled(agent.session)) throw new Error('Summarized working memory is not enabled for this session')
     if (agent.status !== 'idle') throw new Error('Working memory can only be edited while the agent is idle')
     const session = agent.session
     const state = this.ensure(session)
     if (state.revision !== expectedRevision) throw new Error('Working memory changed before the edit was saved')
-    if (state.memoryMessageSeq === undefined) throw new Error('Working memory has not entered the session surface')
-    if (session.surface.nodes.at(-1) !== state.memoryMessageSeq) {
+    if (state.memoryMessageSeq === undefined || state.surfaceStartSeq === undefined) {
+      throw new Error('Working memory has not entered the session surface')
+    }
+    if (session.surface.nodes.at(-1) !== state.surfaceStartSeq) {
       throw new Error('Cannot edit memory while unfinished conversation history is present')
     }
     const edited = parseMemoryEdit(value, this.recentChatLimit)
@@ -226,7 +271,11 @@ export class SessionMemoryController {
       recentChats: next.recentChats,
       memoryMessageSeq: event.seq,
     })
-    Object.assign(state, next, { memoryMessageSeq: event.seq, lastError: undefined })
+    Object.assign(state, next, {
+      memoryMessageSeq: event.seq,
+      surfaceStartSeq: event.seq,
+      lastError: undefined,
+    })
     return this.snapshot(session)
   }
 
@@ -246,14 +295,14 @@ export class SessionMemoryController {
     if (turn === undefined) return
     state.turns.delete(turnNumber)
     const assistant = turn.latestAssistant
-    if (assistant === undefined || state.memoryMessageSeq === undefined) return
+    if (assistant === undefined || state.surfaceStartSeq === undefined) return
 
     try {
       const completion = proposeCompletion(state, turn.expectedRevision, assistantRaw(assistant), this.recentChatLimit)
       const memorySeq = session.seq
       const message = createMemoryMessage(completion.next, memorySeq)
       const event = session.append('user/message', message, {
-        surfaceOp: { op: 'replace', startSeq: state.memoryMessageSeq, endSeq: assistant.seq },
+        surfaceOp: { op: 'replace', startSeq: state.surfaceStartSeq, endSeq: assistant.seq },
       })
       session.append('summarized-working-memory/commit', {
         revision: completion.next.revision,
@@ -265,6 +314,7 @@ export class SessionMemoryController {
       })
       Object.assign(state, completion.next, {
         memoryMessageSeq: event.seq,
+        surfaceStartSeq: event.seq,
         lastResponse: completion.response,
         lastError: undefined,
       })

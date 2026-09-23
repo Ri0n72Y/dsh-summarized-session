@@ -1,4 +1,10 @@
-import type { SessionMemorySnapshot } from '../host/session.ts'
+import type { SessionMemorySnapshot } from '../types.ts'
+import { parseFinalResponse } from '../host/protocol.ts'
+
+export interface AssistantTextBlock {
+  kind: string
+  text?: string
+}
 
 export interface MemoryCommitEvent {
   type: 'summarized-working-memory/commit'
@@ -24,4 +30,22 @@ export function responseFromCommit(value: unknown): string | undefined {
 
 export function responseFromSnapshot(value: SessionMemorySnapshot): string | undefined {
   return value.lastResponse
+}
+
+/** Keep reasoning and other native blocks; replace only a valid final JSON text payload. */
+export function projectAssistantBlocks<T extends AssistantTextBlock>(blocks: readonly T[]): readonly T[] {
+  const textBlocks = blocks.filter(block => block.kind === 'text')
+  if (textBlocks.length === 0 || textBlocks.some(block => typeof block.text !== 'string')) return blocks
+  try {
+    const parsed = parseFinalResponse(textBlocks.map(block => block.text).join(''), Number.MAX_SAFE_INTEGER)
+    let replaced = false
+    return blocks.flatMap((block): T[] => {
+      if (block.kind !== 'text') return [block]
+      if (replaced) return []
+      replaced = true
+      return [{ ...block, text: parsed.response }]
+    })
+  } catch {
+    return blocks
+  }
 }

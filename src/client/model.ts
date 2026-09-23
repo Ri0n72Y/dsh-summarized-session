@@ -1,5 +1,4 @@
-import type { RecentChat } from '../host/protocol.ts'
-import type { SessionMemorySnapshot } from '../host/session.ts'
+import type { RecentChat, SessionMemorySnapshot } from '../types.ts'
 
 export interface EditableMemory {
   summary: string
@@ -12,6 +11,11 @@ export interface WorkingMemoryClient {
   save(expectedRevision: number, memory: EditableMemory): Promise<SessionMemorySnapshot>
   subscribe(listener: (snapshot: SessionMemorySnapshot) => void): () => void
   isRunning(): boolean
+}
+
+export interface WorkingMemoryClientController extends WorkingMemoryClient {
+  refresh(): Promise<SessionMemorySnapshot>
+  setRunning(running: boolean): void
 }
 
 export function parseRecentChatsEditor(raw: string): RecentChat[] {

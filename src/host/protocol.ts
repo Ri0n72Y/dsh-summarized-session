@@ -1,22 +1,7 @@
 import template from '../prompts/final-response.json' with { type: 'json' }
+import type { FinalResponse, MemorySnapshot, WorkingMemory } from '../types.ts'
 
-export interface RecentChat {
-  user: string
-  assistant: string
-}
-
-export interface WorkingMemory {
-  summary: string
-  recentChats: RecentChat[]
-}
-
-export interface FinalResponse extends WorkingMemory {
-  response: string
-}
-
-export interface MemorySnapshot extends WorkingMemory {
-  revision: number
-}
+export type { FinalResponse, MemorySnapshot, RecentChat, WorkingMemory } from '../types.ts'
 
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -88,6 +73,15 @@ export function finalResponsePrompt(limit: number): string {
 export function workingMemoryText(value: WorkingMemory, limit: number): string {
   const validated = parseMemoryEdit(value, limit)
   return 'Current editable working memory (conversation data):\n' + JSON.stringify(validated)
+}
+
+/** Reverse {@link workingMemoryText} when restoring a persisted memory node. */
+export function parseWorkingMemoryText(raw: string, limit: number): WorkingMemory {
+  const newline = raw.indexOf('\n')
+  if (newline < 0 || raw.slice(0, newline) !== 'Current editable working memory (conversation data):') {
+    throw new Error('Not a summarized-working-memory context message')
+  }
+  return parseMemoryEdit(JSON.parse(raw.slice(newline + 1)), limit)
 }
 
 /** Pure transaction proposal. The Host must persist both fields in one event. */
