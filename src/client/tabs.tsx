@@ -163,11 +163,22 @@ export function registerClientSurfaces(ctx: Context): void {
     if (typeof native !== 'function' && (typeof native !== 'object' || native === null)) {
       throw new Error('summarized-working-memory: native assistant renderer is unavailable')
     }
-    const nativeInject = nativeEntry?.inject
+    const nativeEntryInject = nativeEntry?.inject
     const nativeLocale = nativeEntry?.locale as 'chat' | undefined
-    if (nativeInject === undefined) {
+    if (nativeEntryInject === undefined) {
       throw new Error('summarized-working-memory: native assistant renderer injection is unavailable')
     }
+    // `entries()` intentionally erases a registrant's action parameter to
+    // `never`; restore only this inspected keyed-slot seam while preserving
+    // both runtime arguments and the native injection result.
+    const nativeInject = (
+      sessionId: AssistantProps['sessionId'],
+      actions: unknown,
+    ): PresentationInjected => Reflect.apply(
+      nativeEntryInject,
+      nativeEntry,
+      [sessionId, actions],
+    ) as PresentationInjected
     return ctx.slots.register(
       {
         name: 'conversation.chat.node',
