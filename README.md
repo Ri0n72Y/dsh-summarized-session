@@ -36,7 +36,7 @@ Summary 同时吸收最近几轮的内容；Recent Chats 保留含本轮在内�
 npm test
 ```
 
-当前 17 项测试覆盖：严格 JSON、最近 N 条、revision 冲突、提案持久化、人工接受、合法 surface replacement、重启恢复、失败轮保留、未审核提案不成为 accepted memory、跨面板审核草稿、`turn-stopping` 后继续同轮 steering 时不提前压缩、普通预设隔离、稳定上下文保留和 Host accepted 回复投影。
+当前 20 项测试覆盖：严格 JSON、最近 N 条、revision 冲突、提案持久化、单事件原子接受、合法 surface replacement、重启恢复、失败轮保留与人工恢复、陈旧提案失效、配置变更后的 Surface 规范化、跨面板审核草稿、`turn-stopping` 后继续同轮 steering 时不提前压缩、普通预设隔离、稳定上下文保留和 Host accepted 回复投影。
 
 实际 DSH 环境中的下一步调试顺序：
 

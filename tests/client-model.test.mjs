@@ -51,4 +51,9 @@ test('the shared client combines Summary and Recent Chats edits for one proposal
     summary: 'reviewed summary',
     recentChats: [{ user: 'revised', assistant: 'reviewed' }],
   })
+
+  client.setValidationError('recentChats', 'Recent Chats JSON 无效')
+  assert.equal(client.validationError(), 'Recent Chats JSON 无效')
+  client.setValidationError('recentChats')
+  assert.equal(client.validationError(), undefined)
 })

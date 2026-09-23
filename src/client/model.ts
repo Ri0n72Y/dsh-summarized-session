@@ -17,6 +17,8 @@ export interface WorkingMemoryClient {
   isRunning(): boolean
   draft(snapshot: SessionMemorySnapshot): EditableMemory
   updateDraft(snapshot: SessionMemorySnapshot, change: Partial<EditableMemory>): EditableMemory
+  validationError(): string | undefined
+  setValidationError(field: 'recentChats', error?: string): void
 }
 
 export interface WorkingMemoryClientController extends WorkingMemoryClient {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SessionMemoryController, MEMORY_SOURCE_KIND } from '../src/host/session.ts'
+import { parseWorkingMemoryText } from '../src/host/protocol.ts'
 
 class FakeContext {
   listeners = new Map()
@@ -144,6 +145,30 @@ test('successful turns require human acceptance before replacing covered history
   assert.equal(session.surface.nodes.length, 1)
 })
 
+test('acceptance persists memory and its projected response in one authoritative event', async () => {
+  const ctx = new FakeContext()
+  const session = new FakeSession(ctx)
+  const agent = { session, status: 'idle' }
+  const controller = new SessionMemoryController(ctx, 3)
+  controller.attach()
+  ctx.emit('agent/created', { agent, source: 'startup' })
+  await runTurn(ctx, session, agent, 1, assistantEnvelope(1))
+
+  const before = session.events.length
+  const accepted = acceptProposal(controller, agent)
+  assert.equal(session.events.length, before + 1)
+  assert.equal(session.events.at(-1).type, 'user/message')
+  assert.equal(session.events.filter(event => event.type === 'summarized-working-memory/commit').length, 0)
+  assert.equal(accepted.committedResponses[0]?.response, '回复 1')
+
+  const resumedContext = new FakeContext()
+  session.ctx = resumedContext
+  const resumed = new SessionMemoryController(resumedContext, 3)
+  resumed.attach()
+  resumedContext.emit('agent/created', { agent, source: 'resume' })
+  assert.equal(resumed.snapshot(session).committedResponses[0]?.response, '回复 1')
+})
+
 test('a pending proposal restores and can be reviewed before acceptance', async () => {
   const firstContext = new FakeContext()
   const session = new FakeSession(firstContext)
@@ -197,9 +222,12 @@ test('invalid final JSON preserves memory and unfinished raw history', async () 
   assert.equal(after.summary, before.summary)
   assert.equal(session.surface.nodes.length, 3)
   assert.match(after.lastError, /JSON/)
-  assert.throws(() => controller.edit(agent, after.revision, {
-    summary: '不应保存', recentChats: [],
-  }), /unfinished/)
+  const recovered = controller.edit(agent, after.revision, {
+    summary: '人工恢复', recentChats: [],
+  })
+  assert.equal(recovered.revision, before.revision + 1)
+  assert.equal(recovered.summary, '人工恢复')
+  assert.equal(session.surface.nodes.length, 3)
 })
 
 test('a tentative stop followed by same-turn steering does not compact early', async () => {
@@ -319,4 +347,60 @@ test('an unreviewed proposal never becomes accepted memory and can be superseded
   }, first.pending.sourceAssistantSeq), /proposal changed/)
   acceptProposal(controller, agent)
   assert.equal(session.surface.nodes.length, 1)
+})
+
+test('new failed history invalidates an older proposal without blocking manual recovery', async () => {
+  const ctx = new FakeContext()
+  const session = new FakeSession(ctx)
+  const agent = { session, status: 'idle' }
+  const controller = new SessionMemoryController(ctx, 3)
+  controller.attach()
+  ctx.emit('agent/created', { agent, source: 'startup' })
+
+  await runTurn(ctx, session, agent, 1, assistantEnvelope(1))
+  assert.ok(controller.snapshot(session).pending)
+  await runTurn(ctx, session, agent, 2, '{broken')
+  const failed = controller.snapshot(session)
+  assert.equal(failed.pending, undefined)
+  assert.match(failed.lastError, /JSON/)
+
+  const recovered = controller.edit(agent, failed.revision, {
+    summary: '人工恢复状态',
+    recentChats: [{ user: '恢复', assistant: '人工确认保留未完成历史' }],
+  })
+  assert.equal(recovered.revision, 1)
+  assert.equal(recovered.summary, '人工恢复状态')
+  assert.equal(session.surface.nodes.length, 5)
+})
+
+test('a changed recent-chat limit normalizes the persisted surface before the next step', async () => {
+  const firstContext = new FakeContext()
+  const session = new FakeSession(firstContext)
+  const agent = { session, status: 'idle' }
+  const first = new SessionMemoryController(firstContext, 3)
+  first.attach()
+  firstContext.emit('agent/created', { agent, source: 'startup' })
+  const raw = JSON.stringify({
+    response: '回复',
+    summary: '状态',
+    recentChats: [1, 2, 3].map(value => ({ user: `问题 ${value}`, assistant: `处理 ${value}` })),
+  })
+  await runTurn(firstContext, session, agent, 1, raw)
+  acceptProposal(first, agent)
+
+  const resumedContext = new FakeContext()
+  session.ctx = resumedContext
+  const resumed = new SessionMemoryController(resumedContext, 1)
+  resumed.attach()
+  resumedContext.emit('agent/created', { agent, source: 'resume' })
+  assert.equal(resumed.snapshot(session).recentChats.length, 1)
+
+  const current = user('下一轮')
+  await resumedContext.waterfall(
+    'agent/pre-step',
+    { agent, messages: [current], turn: 2, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [current] }),
+  )
+  const memory = session.deriveMessages().find(message => message.source.kind === MEMORY_SOURCE_KIND)
+  assert.equal(parseWorkingMemoryText(memory.content[0].text, Number.MAX_SAFE_INTEGER).recentChats.length, 1)
 })

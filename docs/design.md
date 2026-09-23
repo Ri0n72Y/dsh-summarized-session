@@ -14,7 +14,7 @@ Working Memory 本身只有 Summary 和 Recent Chats。当前用户输入是下�
 2. 建立本轮输入：DSH 的有效系统、工具与环境材料，加上 Summary → Recent Chats → 当前输入。附件和中途 steering 仍保留 DSH 原生消息结构。
 3. 轮内按原生 Agent loop 继续调用工具，每一步保留本轮已发生的 assistant / tool 消息。
 4. 无工具调用的最终回复完成后，先在 `turn-stopping` 标记候选；只有同轮没有新增 steering 且 Agent 真正进入 idle，才解析整个 JSON，并把它持久化为待审核提案。
-5. 用户在右侧页面审核、修改或清空 Summary / Recent Chats；明确接受后，Host 才原子提交 response 与 Working Memory，并替换已覆盖的旧工作历史。未审核提案不进入模型记忆；若继续工作，原始历史保留，较新的完整提案取代较早提案。人类可查看的原始日志始终保留。
+5. 用户在右侧页面审核、修改或清空 Summary / Recent Chats；明确接受后，Host 通过一个权威 replacement memory event 原子提交 response 与 Working Memory，并替换已覆盖的旧工作历史。未审核提案不进入模型记忆；一旦追加新的工作历史，旧提案即失效，较新的完整提案可取代它。人类可查看的原始日志始终保留。
 
 JSON 字段由模型输出；Host 必须负责校验并持久化提案。Client 只呈现与 Host commit 对应的 accepted response，不能把格式正确但未被接受的 JSON 当作成功提交。
 
@@ -61,6 +61,7 @@ JSON 提示词是协议指令，不是要求服务端启用 provider 的全局 J
 
 - 每次完整 JSON 作为一次待审核提案；用户一次接受两个记忆字段，避免 Summary 新、Recent Chats 旧。Host 快照有内部 revision；它不属于模型输出字段。
 - 首版编辑在空闲时保存，运行期间保留可读状态并禁用保存；Host 仍验证 revision，拒绝覆盖更新后的状态。
+- accepted response 与对应 Working Memory 由同一个 replacement memory event 持久化；额外审计事件不能成为恢复正确性所必需的第二次提交。
 - JSON 无效、截断、取消或失败时保留旧记忆，不把半轮内容写成“已完成”。展示错误并保留原始输出供查看，不悄悄增发一次总结请求。
 - 恢复失败轮时不得删除尚未被成功记忆覆盖的工具工作。需要继续该未完成轮或显式提示恢复状态，不能假装已生成完整摘要。
 - Host 对超出 N 的列表保留最新 N 条。程序不能证明摘要事实正确，也不能机械验证最后一条语义上确实覆盖了本轮；因此最终 authority 属于人工审核，而不是模型输出。

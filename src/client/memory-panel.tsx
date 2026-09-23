@@ -21,12 +21,13 @@ const editor: CSSProperties = {
   font: 'inherit', lineHeight: 1.5,
 }
 
-function Footer({ revision, busy, dirty, pending, error, onSave, onReset }: {
+function Footer({ revision, busy, dirty, pending, invalid, error, onSave, onReset }: {
   revision: number
   busy: boolean
   dirty: boolean
   pending: boolean
-  error?: string
+  invalid: boolean
+  error: string | undefined
   onSave(): void
   onReset(): void
 }): ReactNode {
@@ -36,7 +37,7 @@ function Footer({ revision, busy, dirty, pending, error, onSave, onReset }: {
       <span style={{ opacity: 0.65, fontSize: 12 }}>revision {revision}</span>
       <span style={{ flex: 1 }} />
       <button type="button" disabled={!dirty || busy} onClick={onReset}>撤销</button>
-      <button type="button" disabled={(!dirty && !pending) || busy} onClick={onSave}>
+      <button type="button" disabled={(!dirty && !pending) || busy || invalid} onClick={onSave}>
         {pending ? '审核并接受' : '保存'}
       </button>
     </div>
@@ -56,6 +57,11 @@ function useMemory(client: WorkingMemoryClient, initial: SessionMemorySnapshot) 
       setError('Agent 运行期间不能保存工作记忆。')
       return
     }
+    const validationError = client.validationError()
+    if (validationError !== undefined) {
+      setError(validationError)
+      return
+    }
     setSaving(true)
     setError(undefined)
     try {
@@ -70,7 +76,7 @@ function useMemory(client: WorkingMemoryClient, initial: SessionMemorySnapshot) 
       setSaving(false)
     }
   }
-  return { snapshot, saving, error, save }
+  return { snapshot, saving, error, validationError: client.validationError(), save }
 }
 
 export function SummaryPanel({ client, initial, running }: MemoryPanelProps): ReactNode {
@@ -97,7 +103,8 @@ export function SummaryPanel({ client, initial, running }: MemoryPanelProps): Re
     }} />
     <Footer revision={memory.snapshot.revision} busy={memory.saving || running} dirty={dirty}
       pending={memory.snapshot.pending !== undefined}
-      error={memory.error} onReset={() => {
+      invalid={memory.validationError !== undefined}
+      error={memory.validationError ?? memory.error} onReset={() => {
         setValue(originalSummary)
         client.updateDraft(memory.snapshot, { summary: originalSummary })
       }}
@@ -128,6 +135,7 @@ export function RecentChatsPanel({ client, initial, running }: MemoryPanelProps)
     try {
       const recentChats = parseRecentChatsEditor(value)
       setParseError(undefined)
+      client.setValidationError('recentChats')
       client.updateDraft(memory.snapshot, { recentChats })
       void memory.save()
     } catch (cause: unknown) {
@@ -151,16 +159,21 @@ export function RecentChatsPanel({ client, initial, running }: MemoryPanelProps)
         try {
           client.updateDraft(memory.snapshot, { recentChats: parseRecentChatsEditor(next) })
           setParseError(undefined)
+          client.setValidationError('recentChats')
         } catch (cause: unknown) {
-          setParseError(cause instanceof Error ? cause.message : String(cause))
+          const message = cause instanceof Error ? cause.message : String(cause)
+          setParseError(message)
+          client.setValidationError('recentChats', message)
         }
       }} />
     <Footer revision={memory.snapshot.revision} busy={memory.saving || running} dirty={dirty}
       pending={memory.snapshot.pending !== undefined}
+      invalid={parseError !== undefined || memory.validationError !== undefined}
       error={parseError ?? memory.error} onReset={() => {
         const next = recentChatsEditorValue(originalRecentChats)
         setValue(next)
         client.updateDraft(memory.snapshot, { recentChats: originalRecentChats })
+        client.setValidationError('recentChats')
         setParseError(undefined)
       }} onSave={save} />
   </section>

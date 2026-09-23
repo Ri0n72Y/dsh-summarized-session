@@ -42,6 +42,7 @@ export class RpcWorkingMemoryClient implements WorkingMemoryClientController {
   private refreshing?: Promise<SessionMemorySnapshot>
   private draftKey?: string
   private editable?: EditableMemory
+  private readonly validationErrors = new Map<string, string>()
   private running = false
   private readonly rpc: ClientConnectionRpc
   private readonly sessionId: SessionId
@@ -86,6 +87,7 @@ export class RpcWorkingMemoryClient implements WorkingMemoryClientController {
     const key = `${value.revision}:${value.pending?.sourceAssistantSeq ?? 'accepted'}`
     if (this.draftKey !== key || this.editable === undefined) {
       this.draftKey = key
+      this.validationErrors.clear()
       this.editable = {
         summary: value.pending?.summary ?? value.summary,
         recentChats: structuredClone(value.pending?.recentChats ?? value.recentChats),
@@ -97,6 +99,20 @@ export class RpcWorkingMemoryClient implements WorkingMemoryClientController {
   updateDraft(value: SessionMemorySnapshot, change: Partial<EditableMemory>): EditableMemory {
     this.editable = { ...this.draft(value), ...structuredClone(change) }
     return this.draft(value)
+  }
+
+  validationError(): string | undefined {
+    const errors = [...this.validationErrors.values()]
+    return errors.length === 0 ? undefined : errors.join('\n')
+  }
+
+  setValidationError(field: 'recentChats', error?: string): void {
+    if (error === undefined) this.validationErrors.delete(field)
+    else this.validationErrors.set(field, error)
+    if (this.current !== undefined) {
+      const notification = { ...this.current }
+      for (const listener of [...this.listeners]) listener(notification)
+    }
   }
 
   async refresh(): Promise<SessionMemorySnapshot> {
