@@ -22,7 +22,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   const presetId = config.presetId ?? PRESET_ID
   validateLimit(recentChatLimit)
   if (!presetId.trim()) throw new Error('presetId must be a nonempty string')
-  ctx.plugin(SummarizedWorkingMemory, recentChatLimit, presetId)
+  ctx.plugin(SummarizedWorkingMemory, { recentChatLimit, presetId })
 }
 
 export { SummarizedWorkingMemory } from './host/api.ts'

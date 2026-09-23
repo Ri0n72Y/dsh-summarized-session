@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
+import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type {
   Session, SessionEvent, SessionSeq, UserMessage,
 } from '@deepseek-ai/dsh-session'
@@ -117,7 +118,7 @@ function createMemoryMessage(memory: MemorySnapshot, acceptedResponse?: Committe
     recentChats: memory.recentChats,
   }
   return {
-    id: `summarized-working-memory-${randomUUID()}`,
+    id: randomUUID() as MessageId,
     role: 'user',
     source: {
       kind: MEMORY_SOURCE_KIND,
@@ -258,7 +259,7 @@ export class SessionMemoryController {
       if (event.type === 'user/message') {
         const source = memorySource(event.data.source)
         if (source === undefined) {
-          if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) state.pending = undefined
+          if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) delete state.pending
           return
         }
         const memory = parseWorkingMemoryText(textContent(event.data), this.recentChatLimit)
@@ -272,11 +273,11 @@ export class SessionMemoryController {
         if (source.acceptedResponse !== undefined) {
           state.responses.set(source.acceptedResponse.sourceAssistantSeq, source.acceptedResponse.response)
         }
-        if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) state.pending = undefined
+        if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) delete state.pending
         return
       }
       if (event.type === 'assistant/message') {
-        if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) state.pending = undefined
+        if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) delete state.pending
         const turn = state.turns.get(event.data.turn)
         if (turn !== undefined) turn.latestAssistant = event
       }

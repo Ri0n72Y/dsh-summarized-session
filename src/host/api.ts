@@ -17,12 +17,12 @@ export class SummarizedWorkingMemory extends Service {
 
   readonly controller: SessionMemoryController
 
-  constructor(ctx: Context, recentChatLimit: number, presetId: string) {
+  constructor(ctx: Context, options: { recentChatLimit: number; presetId: string }) {
     super(ctx, 'summarizedWorkingMemory')
     this.controller = new SessionMemoryController(
       ctx,
-      recentChatLimit,
-      session => session.header.agentPreset === presetId,
+      options.recentChatLimit,
+      session => session.header.agentPreset === options.presetId,
     )
     this.controller.attach()
     registerMemoryRpc(ctx, this)
