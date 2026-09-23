@@ -189,7 +189,7 @@ export function registerClientSurfaces(ctx: Context): void {
         ...(nativeLocale === undefined ? {} : { locale: nativeLocale }),
         inject: nativeInject,
       },
-      responseRenderer(getClient, native as ComponentType<AssistantProps>),
+      responseRenderer(getClient, native as ComponentType<AssistantProps>) as typeof native,
     )
   }), 'summarized-working-memory: response renderer')
 }
