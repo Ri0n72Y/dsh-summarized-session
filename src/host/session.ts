@@ -362,6 +362,7 @@ export class SessionMemoryController {
       return { enabled: false, revision: 0, summary: '', recentChats: [], committedResponses: [] }
     }
     const state = this.ensure(session)
+    const classifyingAssistantSeq = this.classifyingAssistantSeq(state)
     return {
       enabled: true,
       revision: state.revision,
@@ -387,9 +388,7 @@ export class SessionMemoryController {
             : { sourceAssistantSeq: state.recovery.sourceAssistantSeq }),
         },
       }),
-      ...this.classifyingAssistantSeq(state) === undefined
-        ? {}
-        : { classifyingAssistantSeq: this.classifyingAssistantSeq(state) },
+      ...(classifyingAssistantSeq === undefined ? {} : { classifyingAssistantSeq }),
     }
   }
 
