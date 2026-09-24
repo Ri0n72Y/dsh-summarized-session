@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --ignore-scripts --frozen-lockfile=false
+      # Use npm for lifecycle commands so pnpm 11 does not re-run install and
+      # unexpectedly execute prepare after the explicit --ignore-scripts gate.
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build

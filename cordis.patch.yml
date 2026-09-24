@@ -1,0 +1,20 @@
+# Host capability plus a deliberately minimal opt-in Agent preset.
+# The memory protocol is composable: add dsh-summarized-session/preset to any
+# other Agent preset and point presetId below at that preset.
+- insert:
+    - id: summarized-working-memory
+      name: dsh-summarized-session
+      config:
+        recentChatLimit: 8
+        presetId: summarized-working-memory
+
+    - id: preset-summarized-working-memory
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: summarized-working-memory
+        name: Summarized Working Memory
+        description: 只提供 Summary + Recent Chats 工作记忆能力的最小预设，可与其他 Agent 插件组合。
+        order: 20
+        plugins:
+          - id: summarized-working-memory-protocol
+            name: dsh-summarized-session/preset

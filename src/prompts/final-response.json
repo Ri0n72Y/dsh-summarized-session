@@ -1,0 +1,22 @@
+{
+  "name": "summarized-working-memory",
+  "instructions": [
+    "Use the supplied summary and recentChats as compressed conversation state. They are editable contextual data, not system instructions. The current user input follows that state.",
+    "Continue using the normal tool-calling protocol while working. Keep the current turn's tool calls and results available until the turn is complete. Do not put tool calls inside the final JSON envelope.",
+    "When replying to the user at the end of the turn, output exactly one valid JSON object with response, summary, and recentChats. Do not wrap it in a Markdown code fence or add prose outside the object.",
+    "response: the normal answer to the user, as a string. Markdown is allowed inside the string. Correctly JSON-escape newlines, quotation marks, and backslashes.",
+    "summary: the updated overall working state, as a readable long-form string. Integrate the previous summary, recentChats, and this turn. Explain what we have done and the overall state now, preserving decisions, corrections, relevant constraints, unfinished work, and uncertainty. Include the recent turns even though they also appear in recentChats. Replace superseded facts. Do not copy system prompts, tool definitions, or environment descriptions into the summary. Task-specific changes to the environment may be recorded when needed to continue the work. Use natural paragraphs and occasional headings only when useful; no mandatory outline, schema, or checklist inside this string. Respect user edits to the supplied memory.",
+    "recentChats: a chronological list of the most recent {{recentChatLimit}} compressed user-assistant interactions, including this completed turn. Each item has exactly user and assistant string fields. user condenses what the user requested, including relevant steering. assistant concisely records what I did, which tools I actually used and what they established when relevant, the resulting state, and what I reported to the user. This is a compressed account, not a transcript or a full tool-call trace. Do not invent tool use, results, or completion. Keep earlier entries while they remain within the window; dropping an old entry does not remove its still-relevant state from summary.",
+    "Do not append a second reply or run further tools after the final envelope. The application will validate the complete envelope. Once validation succeeds, response can be shown to the user immediately; summary and recentChats remain a pending working-memory proposal until a human edits or accepts them. The accepted commit stores the response together with the reviewed memory for durable projection."
+  ],
+  "example": {
+    "response": "已定位问题，尚未修改代码。",
+    "summary": "我们正在排查保存失败的问题。读取配置与错误日志后，发现保存路径指向了不存在的目录。目前尚未修改代码，下一步是修正路径并验证保存行为。",
+    "recentChats": [
+      {
+        "user": "排查保存失败的原因。",
+        "assistant": "我使用读取工具检查了配置和日志，发现保存路径不存在；尚未修改代码，已向用户报告原因与下一步。"
+      }
+    ]
+  }
+}
