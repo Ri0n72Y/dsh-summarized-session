@@ -10,7 +10,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { ChatNodeViewProps, PresentationInjected } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { SessionMemorySnapshot } from '../types.ts'
 import { RecentChatsPanel, SummaryPanel } from './memory-panel.tsx'
-import { projectAssistantBlocks } from './response.ts'
+import { projectAssistantBlocks, responseForAssistant } from './response.ts'
 import { RpcWorkingMemoryClient } from './transport.ts'
 
 export const SUMMARY_KIND = 'summarized-working-memory.summary'
@@ -114,10 +114,7 @@ function responseRenderer(
     // The final model payload is an internal envelope. Buffer it while running
     // instead of streaming raw JSON into the ordinary conversation.
     if (props.node.data.status === 'running') return null
-    const response = snapshot.pending?.sourceAssistantSeq === props.node.anchorSeq
-      ? snapshot.pending.response
-      : snapshot.committedResponses
-        .find(entry => entry.sourceAssistantSeq === props.node.anchorSeq)?.response
+    const response = responseForAssistant(snapshot, props.node.anchorSeq)
     const blocks = projectAssistantBlocks(props.node.data.blocks, response)
     if (blocks === props.node.data.blocks) return createElement(Native, props)
     return createElement(Native, {
