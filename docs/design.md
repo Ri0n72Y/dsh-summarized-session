@@ -13,10 +13,10 @@ Working Memory 本身只有 Summary 和 Recent Chats。当前用户输入是下�
 1. 从当前 Session 读取最后一次成功提交的记忆快照，以及用户已保存的编辑。首轮为空记忆。
 2. 建立本轮输入：DSH 的有效系统、工具与环境材料，加上 Summary → Recent Chats → 当前输入。附件和中途 steering 仍保留 DSH 原生消息结构。
 3. 轮内按原生 Agent loop 继续调用工具，每一步保留本轮已发生的 assistant / tool 消息。
-4. 无工具调用的最终回复完成后，先在 `turn-stopping` 标记候选；只有同轮没有新增 steering 且 Agent 真正进入 idle，才解析整个 JSON。整包校验成功后，`response` 可以立即投影为普通回复，`summary + recentChats` 则持久化为待审核提案。
-5. 待审核提案存在期间，不允许新的 turn 消费 raw conversation history。新输入重新放回 Agent inbox；用户在右侧页面审核、修改或清空 Summary / Recent Chats，明确接受后，Host 通过一个权威 replacement memory message 原子提交 reviewed Working Memory 和对应 response，并替换已覆盖的旧工作历史，然后恢复此前排队的新输入。人类可查看的原始日志始终保留。
+4. 无工具调用的最终回复完成后，在 `turn-stopping` 标记候选，并在 durable `turn/end` 确认该轮确实正常完成后解析整个 JSON。整包校验成功后，`response` 可以立即投影为普通回复；`summary + recentChats` 作为待审核状态从尚未被 Working Memory 覆盖的原始 surface 重建，不另外写 proposal Session event。
+5. 待审核提案或失败 recovery 存在期间，不允许新的 turn 消费 raw conversation history。被 DSH claim 的 next-step / next-turn 输入按原类别放回 inbox；用户审核或人工恢复后，Host 通过一个权威 replacement memory message 原子提交 Working Memory（成功提案同时保存对应 response），替换被覆盖的旧工作历史，再用不进入模型的 wake marker 唤醒原队列。人类可查看的原始日志始终保留。
 
-JSON 字段由模型输出；Host 负责整包校验、proposal 持久化和轮间屏障。Client 对校验成功的 pending response 和已经 commit 的 response 都只显示 `response` 字段，不显示内部 JSON envelope。
+JSON 字段由模型输出；Host 负责整包校验、从现有 Session surface 重建 pending/recovery 和轮间屏障。Client 对校验成功的 pending response 和已经 commit 的 response 都只显示 `response` 字段，并在 settled 但尚未完成 Host 分类的短窗口继续隐藏内部 JSON envelope。
 
 ## 三个小模块
 
@@ -61,11 +61,11 @@ JSON 提示词是协议指令，不是要求服务端启用 provider 的全局 J
 
 - 每次完整 JSON 作为一次待审核提案；用户一次接受两个记忆字段，避免 Summary 新、Recent Chats 旧。Host 快照有内部 revision；它不属于模型输出字段。
 - 首版编辑在空闲时保存，运行期间保留可读状态并禁用保存；Host 仍验证 revision，拒绝覆盖更新后的状态。
-- accepted response 与对应 Working Memory 由同一个 replacement memory message 持久化；随后追加 `summarized-working-memory/commit` 审计事件。人工直接编辑 accepted memory 时追加 `summarized-working-memory/edit`。这两个审计事件供其他插件/观察者消费，但都不能成为恢复正确性所必需的第二次提交。
-- JSON 无效、截断、取消或失败时保留旧记忆，不把半轮内容写成“已完成”。展示错误并保留原始输出供查看，不悄悄增发一次总结请求。
-- 恢复失败轮时不得删除尚未被成功记忆覆盖的工具工作。需要继续该未完成轮或显式提示恢复状态，不能假装已生成完整摘要。
+- accepted response 与对应 Working Memory 由同一个 replacement `user/message` 持久化。`summarized-working-memory/commit` 与 `summarized-working-memory/edit` 是 Cordis process-local runtime 通知，供同进程插件/观察者消费，不写入 Session log，也不参与重启恢复。
+- JSON 无效、截断、取消、错误、max-tokens 或其他非正常 `turn/end` 时保留旧 accepted memory，并进入显式 recovery；在 recovery 被人工保存前继续阻止跨轮 raw-history 推理，不悄悄增发一次总结请求。
+- 人工 recovery 保存时，用用户确认后的 Summary + Recent Chats 覆盖从上一次 Working Memory 到失败轮尾部的未压缩 surface；不能只改记忆文本却继续把失败原文留给下一轮模型。
 - Host 对超出 N 的列表保留最新 N 条。程序不能证明摘要事实正确，也不能机械验证最后一条语义上确实覆盖了本轮；因此最终 authority 属于人工审核，而不是模型输出。
-- pending proposal 是严格的轮间边界：在它被接受前，新输入只能排队，不能通过保留 raw history 的方式继续推理。
+- pending proposal 与 recovery 都是严格的轮间边界：在它们被处理前，新输入只能排队，不能通过保留 raw history 的方式继续推理。
 - 普通会话不启用轮间替换。Session 恢复后仍必须读到同一份记忆，而不是依赖浏览器本地缓存。
 
 ## 缓存与规模

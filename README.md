@@ -28,7 +28,7 @@ DSH + Cordis 的 SummarizedWorkingMemory 插件开发仓库。
 }
 ```
 
-Summary 同时吸收最近几轮的内容；Recent Chats 保留含本轮在内的最近 N 次压缩交互，更新 Summary 不会清空它。系统提示词、工具定义和环境描述不写进 Summary。AI 只负责提出 Working Memory 更新，用户审核是 accepted Working Memory 的唯一入口。存在待审核提案时不会开启下一轮 raw-history 推理；新输入保存在 Agent inbox 中，接受提案后再恢复处理。
+Summary 同时吸收最近几轮的内容；Recent Chats 保留含本轮在内的最近 N 次压缩交互，更新 Summary 不会清空它。系统提示词、工具定义和环境描述不写进 Summary。AI 只负责提出 Working Memory 更新，用户审核是 accepted Working Memory 的唯一入口。待审核提案与失败恢复状态都从 DSH 已有 Session 事件和 surface 重建，不新增自定义 Session event；它们存在时不会开启下一轮 raw-history 推理，新输入保存在 Agent inbox 中，接受或恢复后再继续处理。
 
 本阶段纯协议、Host 假 Session 状态机与 Client 数据模型测试无需安装依赖，使用 Node.js 24：
 
@@ -36,7 +36,7 @@ Summary 同时吸收最近几轮的内容；Recent Chats 保留含本轮在内�
 npm test
 ```
 
-当前测试覆盖：严格 JSON、最近 N 条、revision 冲突、提案持久化、原子 memory authority、`commit/edit` 审计事件、待审核轮间屏障与输入恢复、合法 surface replacement、重启恢复、失败轮保留与人工恢复、配置变更后的 Surface 规范化、跨面板审核草稿、`turn-stopping` 后继续同轮 steering 时不提前压缩、普通预设隔离、稳定上下文保留，以及 pending/committed response 投影。
+当前测试覆盖：严格 JSON、最近 N 条、revision 冲突、从已有 Session surface 重建 pending/recovery、原子 memory authority、`commit/edit` Cordis runtime 通知、待审核轮间屏障、steering/followup 原类别恢复与唤醒、合法 surface replacement、重启恢复、失败轮人工恢复、配置变更后的 Surface 规范化、跨面板审核草稿、`turn-stopping` 后继续同轮 steering 时不提前压缩、非正常 `turn/end` recovery、普通预设隔离、稳定上下文保留，以及 pending/committed response 投影与 settled 分类窗口缓冲。
 
 实际 DSH 环境中的下一步是运行真实联调矩阵：含工具调用的两轮对话、pending 时继续发送输入、人工修改/接受、重启恢复、非法 JSON/取消，以及普通 preset 隔离。
 
