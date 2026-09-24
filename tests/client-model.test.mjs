@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { parseRecentChatsEditor, recentChatsEditorValue } from '../src/client/model.ts'
-import { projectAssistantBlocks, responseForAssistant } from '../src/client/response.ts'
+import { projectAssistantBlocks, responseForAssistant, shouldBufferAssistant } from '../src/client/response.ts'
 import { RpcWorkingMemoryClient } from '../src/client/transport.ts'
 
 test('Recent Chats editor round-trips the strict public shape', () => {
@@ -13,7 +13,7 @@ test('Recent Chats editor round-trips the strict public shape', () => {
   }
 })
 
-test('assistant projection requires a Host-accepted response and preserves native blocks', () => {
+test('assistant projection preserves native blocks and replaces a validated envelope response', () => {
   const reasoning = { kind: 'reasoning', text: 'thinking' }
   const envelope = JSON.stringify({
     response: 'normal answer', summary: 'state',
@@ -72,4 +72,12 @@ test('validated pending response is visible before memory acceptance', () => {
   assert.equal(responseForAssistant(snapshot, 12), 'pending answer')
   assert.equal(responseForAssistant(snapshot, 9), 'committed answer')
   assert.equal(responseForAssistant(snapshot, 99), undefined)
+})
+
+
+test('assistant envelope stays hidden through the settled classification window', () => {
+  assert.equal(shouldBufferAssistant({}, 'running', 5), true)
+  assert.equal(shouldBufferAssistant({ classifyingAssistantSeq: 5 }, 'settled', 5), true)
+  assert.equal(shouldBufferAssistant({ classifyingAssistantSeq: 5 }, 'settled', 6), false)
+  assert.equal(shouldBufferAssistant({}, 'interrupted', 5), false)
 })
