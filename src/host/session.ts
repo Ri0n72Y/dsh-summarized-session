@@ -157,6 +157,22 @@ function uncoveredState(
       },
     }
   }
+  const turnEnd = session.snapshotEvents().findLast(event =>
+    event.type === 'turn/end'
+      && event.data.turn === endEvent.data.turn
+      && event.seq > endEvent.seq)
+  if (turnEnd?.type !== 'turn/end' || turnEnd.data.reason.kind !== 'completed') {
+    return {
+      recovery: {
+        surfaceStartSeq: startSeq,
+        surfaceEndSeq: endSeq,
+        sourceAssistantSeq: endEvent.seq,
+        message: turnEnd?.type === 'turn/end'
+          ? `Turn ${endEvent.data.turn} ended as ${turnEnd.data.reason.kind} before Working Memory was accepted.`
+          : `Turn ${endEvent.data.turn} has no durable completed boundary and requires manual recovery.`,
+      },
+    }
+  }
   try {
     const completion = proposeCompletion(accepted, accepted.revision, assistantRaw(endEvent), limit)
     return {
