@@ -110,9 +110,14 @@ function responseRenderer(
     // check is in flight. Ordinary Sessions resume their native renderer as
     // soon as the Host reports `enabled: false`.
     if (snapshot === undefined) return null
-    if (!snapshot.enabled || props.node.data.status === 'running') return createElement(Native, props)
-    const response = snapshot.committedResponses
-      .find(entry => entry.sourceAssistantSeq === props.node.anchorSeq)?.response
+    if (!snapshot.enabled) return createElement(Native, props)
+    // The final model payload is an internal envelope. Buffer it while running
+    // instead of streaming raw JSON into the ordinary conversation.
+    if (props.node.data.status === 'running') return null
+    const response = snapshot.pending?.sourceAssistantSeq === props.node.anchorSeq
+      ? snapshot.pending.response
+      : snapshot.committedResponses
+        .find(entry => entry.sourceAssistantSeq === props.node.anchorSeq)?.response
     const blocks = projectAssistantBlocks(props.node.data.blocks, response)
     if (blocks === props.node.data.blocks) return createElement(Native, props)
     return createElement(Native, {
