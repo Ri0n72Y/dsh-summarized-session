@@ -17,9 +17,12 @@ import type {
   PendingMemoryProposal,
   SessionMemorySnapshot,
   WorkingMemory,
+  WorkingMemoryCommitEvent,
+  WorkingMemoryEditEvent,
 } from '../types.ts'
 
 export const MEMORY_SOURCE_KIND = 'summarized-working-memory'
+const WAKE_SOURCE_KIND = 'summarized-working-memory-wake'
 
 export interface MemorySource {
   kind: typeof MEMORY_SOURCE_KIND
@@ -38,12 +41,19 @@ interface PendingProposal extends PendingMemoryProposal {
   surfaceStartSeq: SessionSeq
 }
 
+interface RecoveryState {
+  surfaceStartSeq: SessionSeq
+  surfaceEndSeq: SessionSeq
+  sourceAssistantSeq?: SessionSeq
+  message: string
+}
+
 interface LiveState extends MemorySnapshot {
   memoryMessageSeq?: SessionSeq
-  lastError?: string
   /** First durable surface node covered by the next successful commit. */
   surfaceStartSeq?: SessionSeq
   pending?: PendingProposal
+  recovery?: RecoveryState
   needsNormalization: boolean
   responses: Map<SessionSeq, string>
   turns: Map<number, TurnState>
@@ -54,40 +64,19 @@ export type { SessionMemorySnapshot } from '../types.ts'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'summarized-working-memory': MemorySource
+    'summarized-working-memory-wake': { kind: typeof WAKE_SOURCE_KIND }
   }
 }
 
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    'summarized-working-memory/commit': {
-      revision: number
-      summary: string
-      recentChats: WorkingMemory['recentChats']
-      response: string
-      sourceAssistantSeq: SessionSeq
-      memoryMessageSeq: SessionSeq
-    }
-    'summarized-working-memory/proposal': {
-      expectedRevision: number
-      summary: string
-      recentChats: WorkingMemory['recentChats']
-      response: string
-      sourceAssistantSeq: SessionSeq
-      surfaceStartSeq: SessionSeq
-    }
-    'summarized-working-memory/edit': {
-      revision: number
-      summary: string
-      recentChats: WorkingMemory['recentChats']
-      memoryMessageSeq: SessionSeq
-    }
-    'summarized-working-memory/error': {
-      turn: number
-      sourceAssistantSeq?: SessionSeq
-      message: string
-    }
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /** Accepted a reviewed pending Working Memory proposal. @mode emit */
+    'summarized-working-memory/commit'(payload: WorkingMemoryCommitEvent): void
+    /** Saved an explicit edit or recovery of accepted Working Memory. @mode emit */
+    'summarized-working-memory/edit'(payload: WorkingMemoryEditEvent): void
   }
 }
+
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -129,6 +118,69 @@ function createMemoryMessage(memory: MemorySnapshot, acceptedResponse?: Committe
   }
 }
 
+function createWakeMessage(): UserMessage {
+  return {
+    id: randomUUID() as MessageId,
+    role: 'user',
+    source: { kind: WAKE_SOURCE_KIND },
+    content: [],
+  }
+}
+
+function isWakeMessage(message: UserMessage): boolean {
+  return message.source.kind === WAKE_SOURCE_KIND
+}
+
+function assistantRaw(event: SessionEvent<'assistant/message'>): string {
+  return textContent(event.data.message)
+}
+
+function uncoveredState(
+  session: Session,
+  accepted: MemorySnapshot & { memoryMessageSeq?: SessionSeq },
+  limit: number,
+): Pick<LiveState, 'pending' | 'recovery'> {
+  const startSeq = accepted.memoryMessageSeq
+  if (startSeq === undefined) return {}
+  const start = session.surface.nodes.indexOf(startSeq)
+  if (start < 0) return {}
+  const tail = session.surface.nodes.slice(start + 1)
+  const endSeq = tail.at(-1)
+  if (endSeq === undefined) return {}
+  const endEvent = session.eventAt(endSeq)
+  if (endEvent?.type !== 'assistant/message' || endEvent.data.interrupted === true) {
+    return {
+      recovery: {
+        surfaceStartSeq: startSeq,
+        surfaceEndSeq: endSeq,
+        message: 'Unreviewed working history has no valid completed final response and requires manual recovery.',
+      },
+    }
+  }
+  try {
+    const completion = proposeCompletion(accepted, accepted.revision, assistantRaw(endEvent), limit)
+    return {
+      pending: {
+        expectedRevision: accepted.revision,
+        summary: completion.next.summary,
+        recentChats: completion.next.recentChats,
+        response: completion.response,
+        sourceAssistantSeq: endEvent.seq,
+        surfaceStartSeq: startSeq,
+      },
+    }
+  } catch (error: unknown) {
+    return {
+      recovery: {
+        surfaceStartSeq: startSeq,
+        surfaceEndSeq: endSeq,
+        sourceAssistantSeq: endEvent.seq,
+        message: error instanceof Error ? error.message : String(error),
+      },
+    }
+  }
+}
+
 function readPersistedMemory(session: Session, limit: number): Omit<LiveState, 'turns'> {
   let accepted: MemorySnapshot & { memoryMessageSeq?: SessionSeq; surfaceStartSeq?: SessionSeq } = {
     revision: 0, summary: '', recentChats: [],
@@ -155,42 +207,21 @@ function readPersistedMemory(session: Session, limit: number): Omit<LiveState, '
     break
   }
 
-  let pending: PendingProposal | undefined
   const responses = new Map<SessionSeq, string>()
   for (const event of session.snapshotEvents()) {
-    if ((event.type === 'user/message' || event.type === 'assistant/message')
-      && pending !== undefined && event.seq > pending.sourceAssistantSeq) {
-      pending = undefined
-    }
-    if (event.type === 'user/message') {
-      const source = memorySource(event.data.source)
-      if (source?.acceptedResponse !== undefined) {
-        responses.set(source.acceptedResponse.sourceAssistantSeq, source.acceptedResponse.response)
-      }
-    }
-    if (event.type === 'summarized-working-memory/proposal') {
-      const normalized = parseMemoryEdit({
-        summary: event.data.summary,
-        recentChats: event.data.recentChats,
-      }, limit)
-      pending = { ...event.data, ...normalized }
-    } else if (event.type === 'summarized-working-memory/commit') {
-      responses.set(event.data.sourceAssistantSeq, event.data.response)
-      if (pending?.sourceAssistantSeq === event.data.sourceAssistantSeq) pending = undefined
+    if (event.type !== 'user/message') continue
+    const source = memorySource(event.data.source)
+    if (source?.acceptedResponse !== undefined) {
+      responses.set(source.acceptedResponse.sourceAssistantSeq, source.acceptedResponse.response)
     }
   }
   return {
     ...accepted,
-    ...(pending === undefined ? {} : { pending }),
+    ...uncoveredState(session, accepted, limit),
     needsNormalization,
     responses,
   }
 }
-
-function assistantRaw(event: SessionEvent<'assistant/message'>): string {
-  return textContent(event.data.message)
-}
-
 function replacementSources(session: Session, startSeq: SessionSeq, endSeq: SessionSeq): SessionSeq[] {
   const start = session.surface.nodes.indexOf(startSeq)
   const end = session.surface.nodes.indexOf(endSeq)
@@ -226,15 +257,19 @@ export class SessionMemoryController {
     this.ctx.on('agent/pre-step', async ({ agent, messages: claimed, turn, step }, next): Promise<PreStepDecision> => {
       if (!this.enabled(agent.session)) return next()
       const state = this.ensure(agent.session)
-      this.normalizeMemoryMessage(agent.session, state)
       this.completeStoppedTurns(agent, turn)
 
-      // A completed turn must be reviewed before another turn can consume raw
-      // conversation history. Requeue the claimed input and close this empty
-      // turn; accepting the proposal wakes the preserved queue again.
-      if (state.pending !== undefined) {
-        if (claimed.length) agent.inbox.splice('next-turn', 0, 0, claimed)
+      // Pending or failed/uncovered history is a strict between-turn boundary.
+      // Restore the driver's claimed batch to its original inbox classes before
+      // rejecting so no input is lost and no raw history reaches another turn.
+      if (state.pending !== undefined || state.recovery !== undefined) {
+        this.restoreClaimed(agent, claimed, turn, step)
         return { kind: 'reject' }
+      }
+
+      this.normalizeMemoryMessage(agent.session, state)
+      for (let index = claimed.length - 1; index >= 0; index -= 1) {
+        if (isWakeMessage(claimed[index] as UserMessage)) claimed.splice(index, 1)
       }
 
       const decision = await next()
@@ -268,7 +303,7 @@ export class SessionMemoryController {
       if (event.type === 'user/message') {
         const source = memorySource(event.data.source)
         if (source === undefined) {
-          if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) delete state.pending
+          this.extendUnreviewedHistory(state, event.seq)
           return
         }
         const memory = parseWorkingMemoryText(textContent(event.data), this.recentChatLimit)
@@ -277,8 +312,9 @@ export class SessionMemoryController {
           memoryMessageSeq: event.seq,
           surfaceStartSeq: event.seq,
           needsNormalization: false,
-          lastError: undefined,
         })
+        delete state.pending
+        delete state.recovery
         if (source.acceptedResponse !== undefined) {
           state.responses.set(source.acceptedResponse.sourceAssistantSeq, source.acceptedResponse.response)
         }
@@ -286,7 +322,7 @@ export class SessionMemoryController {
         return
       }
       if (event.type === 'assistant/message') {
-        if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) delete state.pending
+        this.extendUnreviewedHistory(state, event.seq, event.seq)
         const turn = state.turns.get(event.data.turn)
         if (turn !== undefined) turn.latestAssistant = event
       }
@@ -322,7 +358,6 @@ export class SessionMemoryController {
         sourceAssistantSeq, response,
       })),
       ...(state.memoryMessageSeq === undefined ? {} : { memoryMessageSeq: state.memoryMessageSeq }),
-      ...(state.lastError === undefined ? {} : { lastError: state.lastError }),
       ...(state.pending === undefined ? {} : {
         pending: {
           response: state.pending.response,
@@ -331,6 +366,17 @@ export class SessionMemoryController {
           sourceAssistantSeq: state.pending.sourceAssistantSeq,
         },
       }),
+      ...(state.recovery === undefined ? {} : {
+        recovery: {
+          message: state.recovery.message,
+          ...(state.recovery.sourceAssistantSeq === undefined
+            ? {}
+            : { sourceAssistantSeq: state.recovery.sourceAssistantSeq }),
+        },
+      }),
+      ...this.classifyingAssistantSeq(state) === undefined
+        ? {}
+        : { classifyingAssistantSeq: this.classifyingAssistantSeq(state) },
     }
   }
 
@@ -376,9 +422,8 @@ export class SessionMemoryController {
         },
         sourceEventSeqs: sources,
       })
-      // Audit event only: the replacement memory message above remains the
-      // authoritative atomic state for crash-safe recovery.
-      session.append('summarized-working-memory/commit', {
+      this.emitCommit({
+        sessionId: session.id,
         revision: next.revision,
         summary: next.summary,
         recentChats: next.recentChats,
@@ -390,6 +435,37 @@ export class SessionMemoryController {
       return this.snapshot(session)
     }
     if (expectedProposalSeq !== undefined) throw new Error('Working-memory proposal is no longer pending')
+
+    if (state.recovery !== undefined) {
+      const recovery = state.recovery
+      if (session.surface.nodes.at(-1) !== recovery.surfaceEndSeq) {
+        throw new Error('Cannot recover working memory after new conversation history was appended')
+      }
+      const next: MemorySnapshot = {
+        revision: state.revision + 1,
+        summary: edited.summary,
+        recentChats: edited.recentChats,
+      }
+      const sources = replacementSources(session, recovery.surfaceStartSeq, recovery.surfaceEndSeq)
+      const memoryEvent = session.append('user/message', createMemoryMessage(next), {
+        surfaceOp: {
+          op: 'replace',
+          startSeq: recovery.surfaceStartSeq,
+          endSeq: recovery.surfaceEndSeq,
+        },
+        sourceEventSeqs: sources,
+      })
+      this.emitEdit({
+        sessionId: session.id,
+        revision: next.revision,
+        summary: next.summary,
+        recentChats: next.recentChats,
+        memoryMessageSeq: memoryEvent.seq,
+        recovery: true,
+      })
+      this.wakeDeferredTurns(agent)
+      return this.snapshot(session)
+    }
     if (state.memoryMessageSeq === undefined || state.surfaceStartSeq === undefined) {
       throw new Error('Working memory has not entered the session surface')
     }
@@ -402,25 +478,110 @@ export class SessionMemoryController {
       surfaceOp: { op: 'replace', startSeq: state.memoryMessageSeq, endSeq: state.memoryMessageSeq },
       sourceEventSeqs: [state.memoryMessageSeq],
     })
-    session.append('summarized-working-memory/edit', {
+    this.emitEdit({
+      sessionId: session.id,
       revision: next.revision,
       summary: next.summary,
       recentChats: next.recentChats,
       memoryMessageSeq: memoryEvent.seq,
+      recovery: false,
     })
     return this.snapshot(session)
   }
 
-  private wakeDeferredTurns(agent: Agent): void {
-    const queued = [...agent.inbox.nextTurn]
-    if (!queued.length) return
+  private emitCommit(payload: WorkingMemoryCommitEvent): void {
+    try {
+      this.ctx.emit('summarized-working-memory/commit', payload)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`summarized working memory commit observer failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`)
+    }
+  }
 
-    // Reinsert the whole queue before waking so FIFO order is unchanged.
-    agent.inbox.splice('next-turn', 0, queued.length, [])
-    for (let index = 0; index < queued.length; index += 1) {
-      const message = queued[index]
-      if (message === undefined) continue
-      agent.send(message, 'next-turn', index === queued.length - 1)
+  private emitEdit(payload: WorkingMemoryEditEvent): void {
+    try {
+      this.ctx.emit('summarized-working-memory/edit', payload)
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`summarized working memory edit observer failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`)
+    }
+  }
+
+  private wakeDeferredTurns(agent: Agent): void {
+    if (agent.status !== 'idle') return
+    if (agent.inbox.nextTurn.length === 0 && agent.inbox.nextStep.length === 0) return
+    if (agent.inbox.nextStep.some(isWakeMessage)) return
+    // DSH alpha.1 has no wake-only seam. Add one private marker to next-step;
+    // pre-step strips it before downstream listeners and model admission.
+    agent.send(createWakeMessage(), 'next-step', true)
+  }
+
+  private restoreClaimed(
+    agent: Agent,
+    claimed: readonly UserMessage[],
+    turn: number,
+    step: number,
+  ): void {
+    if (claimed.length === 0) return
+    if (step > 1) {
+      agent.inbox.splice('next-step', 0, 0, [...claimed])
+      return
+    }
+    const hasNextTurnClaim = this.turnClaimedNextTurn(agent.session, turn)
+    const split = hasNextTurnClaim ? claimed.length - 1 : claimed.length
+    const nextStep = claimed.slice(0, split)
+    const nextTurn = claimed.slice(split)
+    if (nextStep.length) agent.inbox.splice('next-step', 0, 0, [...nextStep])
+    if (nextTurn.length) agent.inbox.splice('next-turn', 0, 0, [...nextTurn])
+  }
+
+  private turnClaimedNextTurn(session: Session, turn: number): boolean {
+    const events = session.snapshotEvents()
+    const start = events.findLastIndex(event => event.type === 'turn/start' && event.data.turn === turn)
+    if (start < 0) return true // lightweight/fake drivers used by tests
+    for (let index = start + 1; index < events.length; index += 1) {
+      const event = events[index]
+      if (event?.type !== 'agent/inbox/spliced') continue
+      if (event.data.target === 'next-turn'
+        && event.data.inserted.length === 0
+        && (event.data.removedCount ?? 0) > 0
+        && event.data.outcome === undefined) return true
+    }
+    return false
+  }
+
+  private classifyingAssistantSeq(state: LiveState): SessionSeq | undefined {
+    let latest: SessionSeq | undefined
+    for (const turn of state.turns.values()) {
+      const seq = turn.latestAssistant?.seq
+      if (seq !== undefined && (latest === undefined || seq > latest)) latest = seq
+    }
+    return latest
+  }
+
+  private extendUnreviewedHistory(
+    state: LiveState,
+    endSeq: SessionSeq,
+    sourceAssistantSeq?: SessionSeq,
+  ): void {
+    if (state.pending !== undefined && endSeq > state.pending.sourceAssistantSeq) {
+      state.recovery = {
+        surfaceStartSeq: state.pending.surfaceStartSeq,
+        surfaceEndSeq: endSeq,
+        sourceAssistantSeq: sourceAssistantSeq ?? state.pending.sourceAssistantSeq,
+        message: 'New conversation history was appended before the pending Working Memory was reviewed.',
+      }
+      delete state.pending
+      return
+    }
+    if (state.recovery !== undefined && endSeq > state.recovery.surfaceEndSeq) {
+      state.recovery = {
+        ...state.recovery,
+        surfaceEndSeq: endSeq,
+        ...(sourceAssistantSeq === undefined ? {} : { sourceAssistantSeq }),
+      }
     }
   }
 
@@ -434,6 +595,7 @@ export class SessionMemoryController {
   }
 
   private normalizeMemoryMessage(session: Session, state: LiveState): void {
+    if (state.pending !== undefined || state.recovery !== undefined) return
     if (!state.needsNormalization || state.memoryMessageSeq === undefined) return
     session.append('user/message', createMemoryMessage(state), {
       surfaceOp: {
@@ -464,19 +626,17 @@ export class SessionMemoryController {
         sourceAssistantSeq: assistant.seq,
         surfaceStartSeq: state.surfaceStartSeq,
       }
-      session.append('summarized-working-memory/proposal', pending)
-      Object.assign(state, {
-        pending,
-        lastError: undefined,
-      })
+      state.pending = pending
+      delete state.recovery
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error)
-      state.lastError = message
-      session.append('summarized-working-memory/error', {
-        turn: turnNumber,
+      state.recovery = {
+        surfaceStartSeq: state.surfaceStartSeq,
+        surfaceEndSeq: assistant.seq,
         sourceAssistantSeq: assistant.seq,
         message,
-      })
+      }
+      delete state.pending
       this.ctx.logger.warn(`summarized working memory rejected turn ${turnNumber}: ${message}`)
     }
   }
