@@ -188,8 +188,6 @@ test('acceptance keeps the memory message authoritative and emits a runtime comm
   assert.equal(session.events.some(event => event.type.startsWith('summarized-working-memory/')), false)
 
   const resumedContext = new FakeContext()
-  const edits = []
-  resumedContext.on('summarized-working-memory/edit', payload => { edits.push(payload) })
   session.ctx = resumedContext
   const resumed = new SessionMemoryController(resumedContext, 3)
   resumed.attach()
@@ -207,6 +205,8 @@ test('a pending proposal restores and can be reviewed before acceptance', async 
   await runTurn(firstContext, session, agent, 1, assistantEnvelope(1))
 
   const resumedContext = new FakeContext()
+  const edits = []
+  resumedContext.on('summarized-working-memory/edit', payload => { edits.push(payload) })
   session.ctx = resumedContext
   const resumed = new SessionMemoryController(resumedContext, 3)
   resumed.attach()
