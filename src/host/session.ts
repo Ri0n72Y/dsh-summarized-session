@@ -224,12 +224,21 @@ export class SessionMemoryController {
     })
 
     this.ctx.on('agent/pre-step', async ({ agent, messages: claimed, turn, step }, next): Promise<PreStepDecision> => {
-      const decision = await next()
-      if (decision.kind === 'reject') return decision
-      if (!this.enabled(agent.session)) return decision
+      if (!this.enabled(agent.session)) return next()
       const state = this.ensure(agent.session)
       this.normalizeMemoryMessage(agent.session, state)
       this.completeStoppedTurns(agent, turn)
+
+      // A completed turn must be reviewed before another turn can consume raw
+      // conversation history. Requeue the claimed input and close this empty
+      // turn; accepting the proposal wakes the preserved queue again.
+      if (state.pending !== undefined) {
+        if (claimed.length) agent.inbox.splice('next-turn', 0, 0, claimed)
+        return { kind: 'reject' }
+      }
+
+      const decision = await next()
+      if (decision.kind === 'reject') return decision
       if (step === 1 && !state.turns.has(turn)) {
         state.turns.set(turn, { expectedRevision: state.revision, stopping: false })
       }
@@ -356,7 +365,7 @@ export class SessionMemoryController {
       const sources = replacementSources(
         session, pending.surfaceStartSeq, pending.sourceAssistantSeq,
       )
-      session.append('user/message', createMemoryMessage(next, {
+      const memoryEvent = session.append('user/message', createMemoryMessage(next, {
         response: pending.response,
         sourceAssistantSeq: pending.sourceAssistantSeq,
       }), {
@@ -367,6 +376,17 @@ export class SessionMemoryController {
         },
         sourceEventSeqs: sources,
       })
+      // Audit event only: the replacement memory message above remains the
+      // authoritative atomic state for crash-safe recovery.
+      session.append('summarized-working-memory/commit', {
+        revision: next.revision,
+        summary: next.summary,
+        recentChats: next.recentChats,
+        response: pending.response,
+        sourceAssistantSeq: pending.sourceAssistantSeq,
+        memoryMessageSeq: memoryEvent.seq,
+      })
+      this.wakeDeferredTurns(agent)
       return this.snapshot(session)
     }
     if (expectedProposalSeq !== undefined) throw new Error('Working-memory proposal is no longer pending')
@@ -378,11 +398,30 @@ export class SessionMemoryController {
       summary: edited.summary,
       recentChats: edited.recentChats,
     }
-    session.append('user/message', createMemoryMessage(next), {
+    const memoryEvent = session.append('user/message', createMemoryMessage(next), {
       surfaceOp: { op: 'replace', startSeq: state.memoryMessageSeq, endSeq: state.memoryMessageSeq },
       sourceEventSeqs: [state.memoryMessageSeq],
     })
+    session.append('summarized-working-memory/edit', {
+      revision: next.revision,
+      summary: next.summary,
+      recentChats: next.recentChats,
+      memoryMessageSeq: memoryEvent.seq,
+    })
     return this.snapshot(session)
+  }
+
+  private wakeDeferredTurns(agent: Agent): void {
+    const queued = [...agent.inbox.nextTurn]
+    if (!queued.length) return
+
+    // Reinsert the whole queue before waking so FIFO order is unchanged.
+    agent.inbox.splice('next-turn', 0, queued.length, [])
+    for (let index = 0; index < queued.length; index += 1) {
+      const message = queued[index]
+      if (message === undefined) continue
+      agent.send(message, 'next-turn', index === queued.length - 1)
+    }
   }
 
   private ensure(session: Session): LiveState {
