@@ -21,11 +21,12 @@ const editor: CSSProperties = {
   font: 'inherit', lineHeight: 1.5,
 }
 
-function Footer({ revision, busy, dirty, pending, invalid, error, onSave, onReset }: {
+function Footer({ revision, busy, dirty, pending, recovery, invalid, error, onSave, onReset }: {
   revision: number
   busy: boolean
   dirty: boolean
   pending: boolean
+  recovery: boolean
   invalid: boolean
   error: string | undefined
   onSave(): void
@@ -37,8 +38,8 @@ function Footer({ revision, busy, dirty, pending, invalid, error, onSave, onRese
       <span style={{ opacity: 0.65, fontSize: 12 }}>revision {revision}</span>
       <span style={{ flex: 1 }} />
       <button type="button" disabled={!dirty || busy} onClick={onReset}>撤销</button>
-      <button type="button" disabled={(!dirty && !pending) || busy || invalid} onClick={onSave}>
-        {pending ? '审核并接受' : '保存'}
+      <button type="button" disabled={(!dirty && !pending && !recovery) || busy || invalid} onClick={onSave}>
+        {pending ? '审核并接受' : recovery ? '恢复并保存' : '保存'}
       </button>
     </div>
   </div>
@@ -47,10 +48,10 @@ function Footer({ revision, busy, dirty, pending, invalid, error, onSave, onRese
 function useMemory(client: WorkingMemoryClient, initial: SessionMemorySnapshot) {
   const [snapshot, setSnapshot] = useState(initial)
   const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string>()
+  const [error, setError] = useState<string | undefined>(initial.recovery?.message)
   useEffect(() => client.subscribe((next) => {
     setSnapshot(next)
-    setError(next.lastError)
+    setError(next.recovery?.message)
   }), [client])
   const save = async () => {
     if (client.isRunning()) {
@@ -94,7 +95,9 @@ export function SummaryPanel({ client, initial, running }: MemoryPanelProps): Re
       <div style={{ opacity: 0.65, fontSize: 12 }}>
         {memory.snapshot.pending
           ? '这是 AI 提议的更新；可修改或清空，只有点击“审核并接受”后才会成为工作记忆。'
-          : '可编辑的总体工作状态；保存后从下一轮开始生效。'}
+          : memory.snapshot.recovery
+            ? '上一轮没有形成可接受的工作记忆；请确认或修改当前内容，保存后会覆盖未压缩的失败历史。'
+            : '可编辑的总体工作状态；保存后从下一轮开始生效。'}
       </div>
     </div>
     <textarea aria-label="Summary 内容" style={editor} value={value} onChange={(event) => {
@@ -103,6 +106,7 @@ export function SummaryPanel({ client, initial, running }: MemoryPanelProps): Re
     }} />
     <Footer revision={memory.snapshot.revision} busy={memory.saving || running} dirty={dirty}
       pending={memory.snapshot.pending !== undefined}
+      recovery={memory.snapshot.recovery !== undefined}
       invalid={memory.validationError !== undefined}
       error={memory.validationError ?? memory.error} onReset={() => {
         setValue(originalSummary)
@@ -148,7 +152,9 @@ export function RecentChatsPanel({ client, initial, running }: MemoryPanelProps)
       <div style={{ opacity: 0.65, fontSize: 12 }}>
         {memory.snapshot.pending
           ? '这是 AI 提议的近期记录；可修改或清空，接受前不会覆盖现有工作记忆。'
-          : '按时间升序保存最近几轮压缩交互，格式为 user / assistant。'}
+          : memory.snapshot.recovery
+            ? '上一轮压缩失败；保存当前列表后会用它替换未压缩的失败历史。'
+            : '按时间升序保存最近几轮压缩交互，格式为 user / assistant。'}
       </div>
     </div>
     <textarea aria-label="Recent Chats JSON" spellCheck={false}
@@ -168,6 +174,7 @@ export function RecentChatsPanel({ client, initial, running }: MemoryPanelProps)
       }} />
     <Footer revision={memory.snapshot.revision} busy={memory.saving || running} dirty={dirty}
       pending={memory.snapshot.pending !== undefined}
+      recovery={memory.snapshot.recovery !== undefined}
       invalid={parseError !== undefined || memory.validationError !== undefined}
       error={parseError ?? memory.error} onReset={() => {
         const next = recentChatsEditorValue(originalRecentChats)
