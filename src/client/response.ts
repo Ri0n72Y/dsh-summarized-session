@@ -30,3 +30,12 @@ export function responseForAssistant(
   return snapshot.committedResponses
     .find(entry => entry.sourceAssistantSeq === sourceAssistantSeq)?.response
 }
+
+
+export function shouldBufferAssistant(
+  snapshot: Pick<SessionMemorySnapshot, 'classifyingAssistantSeq'>,
+  status: 'running' | 'settled' | 'interrupted',
+  sourceAssistantSeq: number,
+): boolean {
+  return status === 'running' || snapshot.classifyingAssistantSeq === sourceAssistantSeq
+}
