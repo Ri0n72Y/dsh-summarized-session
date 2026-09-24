@@ -123,6 +123,7 @@ async function runTurn(ctx, session, agent, turn, raw) {
     stream: [],
   })
   ctx.emit('agent/turn-stopping', { agent, turn, signal: new AbortController().signal })
+  session.append('turn/end', { turn, reason: { kind: 'completed' } })
   ctx.emit('agent/status', { agent, status: 'idle' })
 }
 
@@ -285,7 +286,7 @@ test('invalid final JSON blocks later turns until manual recovery replaces raw h
   assert.equal(session.events.some(event => event.type.startsWith('summarized-working-memory/')), false)
 })
 
-test('a non-completed durable turn end enters recovery without waiting for agent error', async () => {
+test('a non-completed durable turn end stays recovery after restart even with valid JSON', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
   const agent = fakeAgent(session, 'running')
@@ -304,13 +305,23 @@ test('a non-completed durable turn end enters recovery without waiting for agent
     turn: 1, step: 1, stream: [],
     message: {
       id: crypto.randomUUID(), role: 'assistant',
-      source: { kind: 'model', provider: 'test', model: 'test' }, content: text('partial'),
+      source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1)),
     },
   })
   session.append('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
   const snapshot = controller.snapshot(session)
   assert.match(snapshot.recovery?.message, /max-tokens/)
   assert.equal(snapshot.pending, undefined)
+
+  const resumedContext = new FakeContext()
+  session.ctx = resumedContext
+  const resumedAgent = fakeAgent(session)
+  const resumed = new SessionMemoryController(resumedContext, 3)
+  resumed.attach()
+  resumedContext.emit('agent/created', { agent: resumedAgent, source: 'resume' })
+  const restored = resumed.snapshot(session)
+  assert.match(restored.recovery?.message, /max-tokens/)
+  assert.equal(restored.pending, undefined)
 })
 
 test('a tentative stop followed by same-turn steering does not compact early', async () => {
@@ -350,6 +361,7 @@ test('a tentative stop followed by same-turn steering does not compact early', a
     message: { id: crypto.randomUUID(), role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1, '最终状态')) },
   })
   ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
   ctx.emit('agent/status', { agent, status: 'idle' })
   agent.status = 'idle'
   assert.equal(controller.snapshot(session).pending?.summary, '最终状态')
