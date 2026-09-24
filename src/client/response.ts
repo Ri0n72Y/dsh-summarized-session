@@ -3,12 +3,12 @@ export interface AssistantTextBlock {
   text?: string
 }
 
-/** Keep native non-text blocks; replace text only after the Host accepted this exact response. */
+/** Keep native non-text blocks; replace envelope text once the Host validated this exact response. */
 export function projectAssistantBlocks<T extends AssistantTextBlock>(
   blocks: readonly T[],
-  acceptedResponse: string | undefined,
+  visibleResponse: string | undefined,
 ): readonly T[] {
-  if (acceptedResponse === undefined) return blocks
+  if (visibleResponse === undefined) return blocks
   const textBlocks = blocks.filter(block => block.kind === 'text')
   if (textBlocks.length === 0 || textBlocks.some(block => typeof block.text !== 'string')) return blocks
   let replaced = false
@@ -16,6 +16,6 @@ export function projectAssistantBlocks<T extends AssistantTextBlock>(
     if (block.kind !== 'text') return [block]
     if (replaced) return []
     replaced = true
-    return [{ ...block, text: acceptedResponse }]
+    return [{ ...block, text: visibleResponse }]
   })
 }
