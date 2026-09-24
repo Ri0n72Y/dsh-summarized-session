@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { parseRecentChatsEditor, recentChatsEditorValue } from '../src/client/model.ts'
-import { projectAssistantBlocks } from '../src/client/response.ts'
+import { projectAssistantBlocks, responseForAssistant } from '../src/client/response.ts'
 import { RpcWorkingMemoryClient } from '../src/client/transport.ts'
 
 test('Recent Chats editor round-trips the strict public shape', () => {
@@ -56,4 +56,20 @@ test('the shared client combines Summary and Recent Chats edits for one proposal
   assert.equal(client.validationError(), 'Recent Chats JSON 无效')
   client.setValidationError('recentChats')
   assert.equal(client.validationError(), undefined)
+})
+
+
+test('validated pending response is visible before memory acceptance', () => {
+  const snapshot = {
+    pending: {
+      response: 'pending answer',
+      summary: 'proposed',
+      recentChats: [{ user: 'u', assistant: 'a' }],
+      sourceAssistantSeq: 12,
+    },
+    committedResponses: [{ sourceAssistantSeq: 9, response: 'committed answer' }],
+  }
+  assert.equal(responseForAssistant(snapshot, 12), 'pending answer')
+  assert.equal(responseForAssistant(snapshot, 9), 'committed answer')
+  assert.equal(responseForAssistant(snapshot, 99), undefined)
 })
