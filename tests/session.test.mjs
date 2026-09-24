@@ -172,6 +172,7 @@ test('acceptance keeps the memory message authoritative and emits a runtime comm
   const agent = fakeAgent(session)
   const commits = []
   ctx.on('summarized-working-memory/commit', payload => { commits.push(payload) })
+  ctx.on('summarized-working-memory/commit', () => { throw new Error('observer boom') })
   const controller = new SessionMemoryController(ctx, 3)
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
@@ -185,6 +186,7 @@ test('acceptance keeps the memory message authoritative and emits a runtime comm
   assert.equal(commits[0].memoryMessageSeq, session.events.at(-1).seq)
   assert.equal(commits[0].response, '回复 1')
   assert.equal(accepted.committedResponses[0]?.response, '回复 1')
+  assert.match(ctx.warnings.at(-1), /observer boom/)
   assert.equal(session.events.some(event => event.type.startsWith('summarized-working-memory/')), false)
 
   const resumedContext = new FakeContext()
@@ -283,6 +285,34 @@ test('invalid final JSON blocks later turns until manual recovery replaces raw h
   assert.equal(session.events.some(event => event.type.startsWith('summarized-working-memory/')), false)
 })
 
+test('a non-completed durable turn end enters recovery without waiting for agent error', async () => {
+  const ctx = new FakeContext()
+  const session = new FakeSession(ctx)
+  const agent = fakeAgent(session, 'running')
+  const controller = new SessionMemoryController(ctx, 3)
+  controller.attach()
+  ctx.emit('agent/created', { agent, source: 'startup' })
+
+  const current = user('触发 max tokens')
+  const decision = await ctx.waterfall(
+    'agent/pre-step',
+    { agent, messages: [current], turn: 1, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [current] }),
+  )
+  for (const message of decision.messages) session.append('user/message', message, { surfaceOp: 'append' })
+  session.append('assistant/message', {
+    turn: 1, step: 1, stream: [],
+    message: {
+      id: crypto.randomUUID(), role: 'assistant',
+      source: { kind: 'model', provider: 'test', model: 'test' }, content: text('partial'),
+    },
+  })
+  session.append('turn/end', { turn: 1, reason: { kind: 'max-tokens' } })
+  const snapshot = controller.snapshot(session)
+  assert.match(snapshot.recovery?.message, /max-tokens/)
+  assert.equal(snapshot.pending, undefined)
+})
+
 test('a tentative stop followed by same-turn steering does not compact early', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
@@ -377,6 +407,35 @@ test('disabled sessions remain untouched', async () => {
   assert.deepEqual(controller.snapshot(session), {
     enabled: false, revision: 0, summary: '', recentChats: [], committedResponses: [],
   })
+})
+
+test('pending rejection restores claimed steering and followup to their original inbox classes', async () => {
+  const ctx = new FakeContext()
+  const session = new FakeSession(ctx)
+  const agent = fakeAgent(session)
+  const controller = new SessionMemoryController(ctx, 3)
+  controller.attach()
+  ctx.emit('agent/created', { agent, source: 'startup' })
+  await runTurn(ctx, session, agent, 1, assistantEnvelope(1))
+
+  const steering = user('steering')
+  const followup = user('followup')
+  session.append('turn/start', { turn: 2 })
+  session.append('agent/inbox/spliced', {
+    target: 'next-step', start: 0, removedCount: 1, inserted: [],
+  })
+  session.append('agent/inbox/spliced', {
+    target: 'next-turn', start: 0, removedCount: 1, inserted: [],
+  })
+
+  const decision = await ctx.waterfall(
+    'agent/pre-step',
+    { agent, messages: [steering, followup], turn: 2, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [steering, followup] }),
+  )
+  assert.deepEqual(decision, { kind: 'reject' })
+  assert.deepEqual(agent.inbox.nextStep.map(message => message.id), [steering.id])
+  assert.deepEqual(agent.inbox.nextTurn.map(message => message.id), [followup.id])
 })
 
 test('pending proposal blocks the next turn and resumes its input after acceptance', async () => {
