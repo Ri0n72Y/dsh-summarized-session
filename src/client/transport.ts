@@ -30,7 +30,16 @@ function snapshot(value: unknown): SessionMemorySnapshot {
         || typeof candidate.pending.summary !== 'string'
         || !chats(candidate.pending.recentChats)
         || !Number.isSafeInteger(candidate.pending.sourceAssistantSeq)
-        || candidate.pending.sourceAssistantSeq < 0))) {
+        || candidate.pending.sourceAssistantSeq < 0))
+    || (candidate.recovery !== undefined
+      && (typeof candidate.recovery !== 'object'
+        || typeof candidate.recovery.message !== 'string'
+        || (candidate.recovery.sourceAssistantSeq !== undefined
+          && (!Number.isSafeInteger(candidate.recovery.sourceAssistantSeq)
+            || candidate.recovery.sourceAssistantSeq < 0))))
+    || (candidate.classifyingAssistantSeq !== undefined
+      && (!Number.isSafeInteger(candidate.classifyingAssistantSeq)
+        || candidate.classifyingAssistantSeq < 0))) {
     throw new Error('Host returned an invalid working-memory snapshot')
   }
   return candidate as SessionMemorySnapshot
