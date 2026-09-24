@@ -1,4 +1,3 @@
-import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type { SessionMemorySnapshot } from '../types.ts'
 
 export interface AssistantTextBlock {
@@ -25,7 +24,7 @@ export function projectAssistantBlocks<T extends AssistantTextBlock>(
 
 export function responseForAssistant(
   snapshot: Pick<SessionMemorySnapshot, 'pending' | 'committedResponses'>,
-  sourceAssistantSeq: SessionSeq,
+  sourceAssistantSeq: number,
 ): string | undefined {
   if (snapshot.pending?.sourceAssistantSeq === sourceAssistantSeq) return snapshot.pending.response
   return snapshot.committedResponses
