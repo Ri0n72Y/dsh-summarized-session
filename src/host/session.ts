@@ -257,7 +257,7 @@ export class SessionMemoryController {
     this.ctx.on('agent/pre-step', async ({ agent, messages: claimed, turn, step }, next): Promise<PreStepDecision> => {
       if (!this.enabled(agent.session)) return next()
       const state = this.ensure(agent.session)
-      this.completeStoppedTurns(agent, turn)
+      this.completeStoppedTurns(agent.session, turn)
 
       // Pending or failed/uncovered history is a strict between-turn boundary.
       // Restore the driver's claimed batch to its original inbox classes before
@@ -318,13 +318,28 @@ export class SessionMemoryController {
         if (source.acceptedResponse !== undefined) {
           state.responses.set(source.acceptedResponse.sourceAssistantSeq, source.acceptedResponse.response)
         }
-        if (state.pending !== undefined && event.seq > state.pending.sourceAssistantSeq) delete state.pending
         return
       }
       if (event.type === 'assistant/message') {
         this.extendUnreviewedHistory(state, event.seq, event.seq)
         const turn = state.turns.get(event.data.turn)
         if (turn !== undefined) turn.latestAssistant = event
+        return
+      }
+      if (event.type === 'turn/end') {
+        const turn = state.turns.get(event.data.turn)
+        if (event.data.reason.kind === 'completed' && turn?.stopping === true) {
+          this.complete(session, event.data.turn)
+          return
+        }
+        state.turns.delete(event.data.turn)
+        if (event.data.reason.kind !== 'blocked') {
+          this.forceRecoveryFromSurface(
+            session,
+            state,
+            `Turn ${event.data.turn} ended as ${event.data.reason.kind} before Working Memory was accepted.`,
+          )
+        }
       }
     })
 
@@ -336,11 +351,9 @@ export class SessionMemoryController {
     })
 
     this.ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle' && this.enabled(agent.session)) this.completeStoppedTurns(agent)
-    })
-
-    this.ctx.on('agent/error', ({ agent, turn }) => {
-      this.states.get(agent.session)?.turns.delete(turn)
+      // Fallback for lightweight/custom drivers that do not expose the durable
+      // turn/end event before becoming idle.
+      if (status === 'idle' && this.enabled(agent.session)) this.completeStoppedTurns(agent.session)
     })
   }
 
@@ -585,6 +598,26 @@ export class SessionMemoryController {
     }
   }
 
+  private forceRecoveryFromSurface(session: Session, state: LiveState, message: string): void {
+    const startSeq = state.memoryMessageSeq
+    if (startSeq === undefined) return
+    const start = session.surface.nodes.indexOf(startSeq)
+    if (start < 0) return
+    const endSeq = session.surface.nodes.at(-1)
+    if (endSeq === undefined || endSeq === startSeq) return
+    const assistant = session.surface.nodes
+      .slice(start + 1)
+      .map(seq => session.eventAt(seq))
+      .findLast((event): event is SessionEvent<'assistant/message'> => event?.type === 'assistant/message')
+    state.recovery = {
+      surfaceStartSeq: startSeq,
+      surfaceEndSeq: endSeq,
+      ...(assistant === undefined ? {} : { sourceAssistantSeq: assistant.seq }),
+      message,
+    }
+    delete state.pending
+  }
+
   private ensure(session: Session): LiveState {
     const current = this.states.get(session)
     if (current !== undefined) return current
@@ -607,8 +640,7 @@ export class SessionMemoryController {
     })
   }
 
-  private complete(agent: Agent, turnNumber: number): void {
-    const session = agent.session
+  private complete(session: Session, turnNumber: number): void {
     const state = this.ensure(session)
     const turn = state.turns.get(turnNumber)
     if (turn === undefined) return
@@ -641,12 +673,12 @@ export class SessionMemoryController {
     }
   }
 
-  private completeStoppedTurns(agent: Agent, exceptTurn?: number): void {
-    const state = this.ensure(agent.session)
+  private completeStoppedTurns(session: Session, exceptTurn?: number): void {
+    const state = this.ensure(session)
     const completed = [...state.turns]
       .filter(([turn, value]) => value.stopping && turn !== exceptTurn)
       .map(([turn]) => turn)
       .sort((left, right) => left - right)
-    for (const turn of completed) this.complete(agent, turn)
+    for (const turn of completed) this.complete(session, turn)
   }
 }
