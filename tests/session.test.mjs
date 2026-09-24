@@ -70,6 +70,27 @@ class FakeSession {
 const text = value => [{ type: 'text', text: value }]
 const user = value => ({ id: crypto.randomUUID(), role: 'user', source: { kind: 'test' }, content: text(value) })
 
+function fakeAgent(session, status = 'idle') {
+  const queues = { 'next-turn': [], 'next-step': [] }
+  const inbox = {
+    get nextTurn() { return queues['next-turn'] },
+    get nextStep() { return queues['next-step'] },
+    splice(target, start, deleteCount, inserted) {
+      return queues[target].splice(start, deleteCount, ...inserted)
+    },
+  }
+  const agent = {
+    session,
+    status,
+    inbox,
+    send(message, target, wakeup) {
+      queues[target].push(message)
+      if (wakeup) agent.status = 'running'
+    },
+  }
+  return agent
+}
+
 function assistantEnvelope(turn, summary = `状态 ${turn}`) {
   return JSON.stringify({
     response: `回复 ${turn}`,
@@ -117,7 +138,7 @@ function acceptProposal(controller, agent) {
 test('successful turns require human acceptance before replacing covered history', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
-  const agent = { session, status: 'idle' }
+  const agent = fakeAgent(session)
   const controller = new SessionMemoryController(ctx, 3)
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
@@ -145,10 +166,10 @@ test('successful turns require human acceptance before replacing covered history
   assert.equal(session.surface.nodes.length, 1)
 })
 
-test('acceptance persists memory and its projected response in one authoritative event', async () => {
+test('acceptance keeps the memory message authoritative and emits a commit audit event', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
-  const agent = { session, status: 'idle' }
+  const agent = fakeAgent(session)
   const controller = new SessionMemoryController(ctx, 3)
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
@@ -156,11 +177,14 @@ test('acceptance persists memory and its projected response in one authoritative
 
   const before = session.events.length
   const accepted = acceptProposal(controller, agent)
-  assert.equal(session.events.length, before + 1)
-  assert.equal(session.events.at(-1).type, 'user/message')
-  assert.equal(session.events.filter(event => event.type === 'summarized-working-memory/commit').length, 0)
+  assert.equal(session.events.length, before + 2)
+  assert.equal(session.events.at(-2).type, 'user/message')
+  assert.equal(session.events.at(-1).type, 'summarized-working-memory/commit')
+  assert.equal(session.events.at(-1).data.memoryMessageSeq, session.events.at(-2).seq)
   assert.equal(accepted.committedResponses[0]?.response, '回复 1')
 
+  // The audit event is useful to observers but is not required for recovery.
+  session.events.pop()
   const resumedContext = new FakeContext()
   session.ctx = resumedContext
   const resumed = new SessionMemoryController(resumedContext, 3)
@@ -172,7 +196,7 @@ test('acceptance persists memory and its projected response in one authoritative
 test('a pending proposal restores and can be reviewed before acceptance', async () => {
   const firstContext = new FakeContext()
   const session = new FakeSession(firstContext)
-  const agent = { session, status: 'idle' }
+  const agent = fakeAgent(session)
   const first = new SessionMemoryController(firstContext, 3)
   first.attach()
   firstContext.emit('agent/created', { agent, source: 'startup' })
@@ -203,12 +227,14 @@ test('a pending proposal restores and can be reviewed before acceptance', async 
   assert.equal(revised.revision, 2)
   assert.equal(revised.summary, '用户再次修正')
   assert.deepEqual(session.surface.nodes, [revised.memoryMessageSeq])
+  assert.equal(session.events.at(-1).type, 'summarized-working-memory/edit')
+  assert.equal(session.events.at(-1).data.memoryMessageSeq, revised.memoryMessageSeq)
 })
 
 test('invalid final JSON preserves memory and unfinished raw history', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
-  const agent = { session, status: 'idle' }
+  const agent = fakeAgent(session)
   const controller = new SessionMemoryController(ctx, 3)
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
@@ -233,7 +259,7 @@ test('invalid final JSON preserves memory and unfinished raw history', async () 
 test('a tentative stop followed by same-turn steering does not compact early', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
-  const agent = { session, status: 'running' }
+  const agent = fakeAgent(session, 'running')
   const controller = new SessionMemoryController(ctx, 3)
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
@@ -277,7 +303,7 @@ test('a tentative stop followed by same-turn steering does not compact early', a
 test('stable injected context stays before the replaceable memory boundary', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
-  const agent = { session, status: 'idle' }
+  const agent = fakeAgent(session)
   const controller = new SessionMemoryController(ctx, 3)
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
@@ -309,7 +335,7 @@ test('disabled sessions remain untouched', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
   session.header.agentPreset = 'standard'
-  const agent = { session, status: 'idle' }
+  const agent = fakeAgent(session)
   const controller = new SessionMemoryController(ctx, 3, value => value.header.agentPreset === 'summarized-working-memory')
   controller.attach()
   const current = user('current')
@@ -324,59 +350,45 @@ test('disabled sessions remain untouched', async () => {
   })
 })
 
-test('an unreviewed proposal never becomes accepted memory and can be superseded', async () => {
+test('pending proposal blocks the next turn and resumes its input after acceptance', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
-  const agent = { session, status: 'idle' }
+  const agent = fakeAgent(session)
   const controller = new SessionMemoryController(ctx, 3)
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
+
   await runTurn(ctx, session, agent, 1, assistantEnvelope(1))
-  const first = controller.snapshot(session)
-  assert.equal(first.revision, 0)
-  assert.ok(first.pending)
-  await runTurn(ctx, session, agent, 2, assistantEnvelope(2))
-  const latest = controller.snapshot(session)
-  assert.equal(latest.revision, 0)
-  assert.equal(latest.summary, '')
-  assert.equal(latest.pending?.summary, '状态 2')
-  assert.equal(session.surface.nodes.length, 5)
-  assert.throws(() => controller.edit(agent, 0, {
-    summary: first.pending.summary,
-    recentChats: first.pending.recentChats,
-  }, first.pending.sourceAssistantSeq), /proposal changed/)
-  acceptProposal(controller, agent)
+  const pending = controller.snapshot(session)
+  assert.equal(pending.revision, 0)
+  assert.equal(pending.pending?.summary, '状态 1')
+
+  const nextInput = user('输入 2')
+  const decision = await ctx.waterfall(
+    'agent/pre-step',
+    { agent, messages: [nextInput], turn: 2, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [nextInput] }),
+  )
+  assert.deepEqual(decision, { kind: 'reject' })
+  assert.equal(session.surface.nodes.length, 3)
+  assert.equal(controller.snapshot(session).pending?.sourceAssistantSeq, pending.pending.sourceAssistantSeq)
+  assert.equal(agent.inbox.nextTurn.length, 1)
+  assert.equal(agent.inbox.nextTurn[0].id, nextInput.id)
+
+  agent.status = 'idle'
+  const accepted = acceptProposal(controller, agent)
+  assert.equal(accepted.revision, 1)
+  assert.equal(accepted.pending, undefined)
   assert.equal(session.surface.nodes.length, 1)
-})
-
-test('new failed history invalidates an older proposal without blocking manual recovery', async () => {
-  const ctx = new FakeContext()
-  const session = new FakeSession(ctx)
-  const agent = { session, status: 'idle' }
-  const controller = new SessionMemoryController(ctx, 3)
-  controller.attach()
-  ctx.emit('agent/created', { agent, source: 'startup' })
-
-  await runTurn(ctx, session, agent, 1, assistantEnvelope(1))
-  assert.ok(controller.snapshot(session).pending)
-  await runTurn(ctx, session, agent, 2, '{broken')
-  const failed = controller.snapshot(session)
-  assert.equal(failed.pending, undefined)
-  assert.match(failed.lastError, /JSON/)
-
-  const recovered = controller.edit(agent, failed.revision, {
-    summary: '人工恢复状态',
-    recentChats: [{ user: '恢复', assistant: '人工确认保留未完成历史' }],
-  })
-  assert.equal(recovered.revision, 1)
-  assert.equal(recovered.summary, '人工恢复状态')
-  assert.equal(session.surface.nodes.length, 5)
+  assert.equal(agent.inbox.nextTurn.length, 1)
+  assert.equal(agent.inbox.nextTurn[0].id, nextInput.id)
+  assert.equal(agent.status, 'running')
 })
 
 test('a changed recent-chat limit normalizes the persisted surface before the next step', async () => {
   const firstContext = new FakeContext()
   const session = new FakeSession(firstContext)
-  const agent = { session, status: 'idle' }
+  const agent = fakeAgent(session)
   const first = new SessionMemoryController(firstContext, 3)
   first.attach()
   firstContext.emit('agent/created', { agent, source: 'startup' })
