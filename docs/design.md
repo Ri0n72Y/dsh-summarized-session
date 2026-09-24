@@ -13,10 +13,10 @@ Working Memory 本身只有 Summary 和 Recent Chats。当前用户输入是下�
 1. 从当前 Session 读取最后一次成功提交的记忆快照，以及用户已保存的编辑。首轮为空记忆。
 2. 建立本轮输入：DSH 的有效系统、工具与环境材料，加上 Summary → Recent Chats → 当前输入。附件和中途 steering 仍保留 DSH 原生消息结构。
 3. 轮内按原生 Agent loop 继续调用工具，每一步保留本轮已发生的 assistant / tool 消息。
-4. 无工具调用的最终回复完成后，先在 `turn-stopping` 标记候选；只有同轮没有新增 steering 且 Agent 真正进入 idle，才解析整个 JSON，并把它持久化为待审核提案。
-5. 用户在右侧页面审核、修改或清空 Summary / Recent Chats；明确接受后，Host 通过一个权威 replacement memory event 原子提交 response 与 Working Memory，并替换已覆盖的旧工作历史。未审核提案不进入模型记忆；一旦追加新的工作历史，旧提案即失效，较新的完整提案可取代它。人类可查看的原始日志始终保留。
+4. 无工具调用的最终回复完成后，先在 `turn-stopping` 标记候选；只有同轮没有新增 steering 且 Agent 真正进入 idle，才解析整个 JSON。整包校验成功后，`response` 可以立即投影为普通回复，`summary + recentChats` 则持久化为待审核提案。
+5. 待审核提案存在期间，不允许新的 turn 消费 raw conversation history。新输入重新放回 Agent inbox；用户在右侧页面审核、修改或清空 Summary / Recent Chats，明确接受后，Host 通过一个权威 replacement memory message 原子提交 reviewed Working Memory 和对应 response，并替换已覆盖的旧工作历史，然后恢复此前排队的新输入。人类可查看的原始日志始终保留。
 
-JSON 字段由模型输出；Host 必须负责校验并持久化提案。Client 只呈现与 Host commit 对应的 accepted response，不能把格式正确但未被接受的 JSON 当作成功提交。
+JSON 字段由模型输出；Host 负责整包校验、proposal 持久化和轮间屏障。Client 对校验成功的 pending response 和已经 commit 的 response 都只显示 `response` 字段，不显示内部 JSON envelope。
 
 ## 三个小模块
 
@@ -34,7 +34,7 @@ JSON 提示词是协议指令，不是要求服务端启用 provider 的全局 J
 
 | 已核对的接口 | 对本插件的意义 |
 | --- | --- |
-| `@deepseek-ai/dsh-agent-preset` 的 `config.plugins` | 声明独立预设，在预设里挂载本插件；不沿用旧 `agent-presets` 包假设 |
+| `@deepseek-ai/dsh-agent-preset` 的 `config.plugins` | 本插件只作为一个可组合 child plugin 挂载；bundle 自带的 preset 仅是最小 opt-in 壳，不复制完整 Coding Agent 配置 |
 | `systemPrompt.section()` | 注册固定输出协议；变化的记忆不放进系统前缀 |
 | `agent/pre-step` | 可处理输入接纳与 Session surface，必须只在轮次切换时替换历史 |
 | `agent/request` | 只变更 LLM 配置，明确不能修改 messages；不能拿它伪造请求投影 |
@@ -61,10 +61,11 @@ JSON 提示词是协议指令，不是要求服务端启用 provider 的全局 J
 
 - 每次完整 JSON 作为一次待审核提案；用户一次接受两个记忆字段，避免 Summary 新、Recent Chats 旧。Host 快照有内部 revision；它不属于模型输出字段。
 - 首版编辑在空闲时保存，运行期间保留可读状态并禁用保存；Host 仍验证 revision，拒绝覆盖更新后的状态。
-- accepted response 与对应 Working Memory 由同一个 replacement memory event 持久化；额外审计事件不能成为恢复正确性所必需的第二次提交。
+- accepted response 与对应 Working Memory 由同一个 replacement memory message 持久化；随后追加 `summarized-working-memory/commit` 审计事件。人工直接编辑 accepted memory 时追加 `summarized-working-memory/edit`。这两个审计事件供其他插件/观察者消费，但都不能成为恢复正确性所必需的第二次提交。
 - JSON 无效、截断、取消或失败时保留旧记忆，不把半轮内容写成“已完成”。展示错误并保留原始输出供查看，不悄悄增发一次总结请求。
 - 恢复失败轮时不得删除尚未被成功记忆覆盖的工具工作。需要继续该未完成轮或显式提示恢复状态，不能假装已生成完整摘要。
 - Host 对超出 N 的列表保留最新 N 条。程序不能证明摘要事实正确，也不能机械验证最后一条语义上确实覆盖了本轮；因此最终 authority 属于人工审核，而不是模型输出。
+- pending proposal 是严格的轮间边界：在它被接受前，新输入只能排队，不能通过保留 raw history 的方式继续推理。
 - 普通会话不启用轮间替换。Session 恢复后仍必须读到同一份记忆，而不是依赖浏览器本地缓存。
 
 ## 缓存与规模
