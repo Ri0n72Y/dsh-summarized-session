@@ -1,4 +1,4 @@
-import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
+import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 
 export interface RecentChat {
   user: string
@@ -28,11 +28,32 @@ export interface CommittedResponse {
   response: string
 }
 
+export interface RecoveryMemoryState {
+  message: string
+  sourceAssistantSeq?: SessionSeq
+}
+
+export interface WorkingMemoryCommitEvent extends WorkingMemory {
+  sessionId: SessionId
+  revision: number
+  response: string
+  sourceAssistantSeq: SessionSeq
+  memoryMessageSeq: SessionSeq
+}
+
+export interface WorkingMemoryEditEvent extends WorkingMemory {
+  sessionId: SessionId
+  revision: number
+  memoryMessageSeq: SessionSeq
+  recovery: boolean
+}
+
 /** JSON-safe Host/Client snapshot returned by the Connection RPC. */
 export interface SessionMemorySnapshot extends MemorySnapshot {
   enabled: boolean
   memoryMessageSeq?: SessionSeq
-  lastError?: string
   pending?: PendingMemoryProposal
+  recovery?: RecoveryMemoryState
+  classifyingAssistantSeq?: SessionSeq
   committedResponses: CommittedResponse[]
 }
