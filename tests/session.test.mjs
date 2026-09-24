@@ -166,10 +166,12 @@ test('successful turns require human acceptance before replacing covered history
   assert.equal(session.surface.nodes.length, 1)
 })
 
-test('acceptance keeps the memory message authoritative and emits a commit audit event', async () => {
+test('acceptance keeps the memory message authoritative and emits a runtime commit event', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
   const agent = fakeAgent(session)
+  const commits = []
+  ctx.on('summarized-working-memory/commit', payload => { commits.push(payload) })
   const controller = new SessionMemoryController(ctx, 3)
   controller.attach()
   ctx.emit('agent/created', { agent, source: 'startup' })
@@ -177,15 +179,17 @@ test('acceptance keeps the memory message authoritative and emits a commit audit
 
   const before = session.events.length
   const accepted = acceptProposal(controller, agent)
-  assert.equal(session.events.length, before + 2)
-  assert.equal(session.events.at(-2).type, 'user/message')
-  assert.equal(session.events.at(-1).type, 'summarized-working-memory/commit')
-  assert.equal(session.events.at(-1).data.memoryMessageSeq, session.events.at(-2).seq)
+  assert.equal(session.events.length, before + 1)
+  assert.equal(session.events.at(-1).type, 'user/message')
+  assert.equal(commits.length, 1)
+  assert.equal(commits[0].memoryMessageSeq, session.events.at(-1).seq)
+  assert.equal(commits[0].response, '回复 1')
   assert.equal(accepted.committedResponses[0]?.response, '回复 1')
+  assert.equal(session.events.some(event => event.type.startsWith('summarized-working-memory/')), false)
 
-  // The audit event is useful to observers but is not required for recovery.
-  session.events.pop()
   const resumedContext = new FakeContext()
+  const edits = []
+  resumedContext.on('summarized-working-memory/edit', payload => { edits.push(payload) })
   session.ctx = resumedContext
   const resumed = new SessionMemoryController(resumedContext, 3)
   resumed.attach()
@@ -227,11 +231,13 @@ test('a pending proposal restores and can be reviewed before acceptance', async 
   assert.equal(revised.revision, 2)
   assert.equal(revised.summary, '用户再次修正')
   assert.deepEqual(session.surface.nodes, [revised.memoryMessageSeq])
-  assert.equal(session.events.at(-1).type, 'summarized-working-memory/edit')
-  assert.equal(session.events.at(-1).data.memoryMessageSeq, revised.memoryMessageSeq)
+  assert.equal(edits.length, 1)
+  assert.equal(edits[0].memoryMessageSeq, revised.memoryMessageSeq)
+  assert.equal(edits[0].recovery, false)
+  assert.equal(session.events.some(event => event.type.startsWith('summarized-working-memory/')), false)
 })
 
-test('invalid final JSON preserves memory and unfinished raw history', async () => {
+test('invalid final JSON blocks later turns until manual recovery replaces raw history', async () => {
   const ctx = new FakeContext()
   const session = new FakeSession(ctx)
   const agent = fakeAgent(session)
@@ -243,17 +249,38 @@ test('invalid final JSON preserves memory and unfinished raw history', async () 
   const before = controller.snapshot(session)
 
   await runTurn(ctx, session, agent, 2, '{broken')
-  const after = controller.snapshot(session)
-  assert.equal(after.revision, before.revision)
-  assert.equal(after.summary, before.summary)
+  const failed = controller.snapshot(session)
+  assert.equal(failed.revision, before.revision)
+  assert.equal(failed.summary, before.summary)
   assert.equal(session.surface.nodes.length, 3)
-  assert.match(after.lastError, /JSON/)
-  const recovered = controller.edit(agent, after.revision, {
+  assert.match(failed.recovery?.message, /JSON/)
+
+  const resumedContext = new FakeContext()
+  session.ctx = resumedContext
+  const resumedAgent = fakeAgent(session)
+  const resumed = new SessionMemoryController(resumedContext, 3)
+  resumed.attach()
+  resumedContext.emit('agent/created', { agent: resumedAgent, source: 'resume' })
+  assert.match(resumed.snapshot(session).recovery?.message, /JSON/)
+
+  const nextInput = user('不能偷渡到下一轮')
+  const blocked = await resumedContext.waterfall(
+    'agent/pre-step',
+    { agent: resumedAgent, messages: [nextInput], turn: 3, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [nextInput] }),
+  )
+  assert.deepEqual(blocked, { kind: 'reject' })
+  assert.equal(resumedAgent.inbox.nextTurn[0].id, nextInput.id)
+
+  resumedAgent.status = 'idle'
+  const recovered = resumed.edit(resumedAgent, failed.revision, {
     summary: '人工恢复', recentChats: [],
   })
   assert.equal(recovered.revision, before.revision + 1)
   assert.equal(recovered.summary, '人工恢复')
-  assert.equal(session.surface.nodes.length, 3)
+  assert.equal(recovered.recovery, undefined)
+  assert.equal(session.surface.nodes.length, 1)
+  assert.equal(session.events.some(event => event.type.startsWith('summarized-working-memory/')), false)
 })
 
 test('a tentative stop followed by same-turn steering does not compact early', async () => {
@@ -272,10 +299,11 @@ test('a tentative stop followed by same-turn steering does not compact early', a
   )
   for (const message of firstDecision.messages) session.append('user/message', message, { surfaceOp: 'append' })
   assert.equal(firstDecision.messages[0]?.source.kind, MEMORY_SOURCE_KIND)
-  session.append('assistant/message', {
+  const firstAssistant = session.append('assistant/message', {
     turn: 1, step: 1, stream: [],
     message: { id: crypto.randomUUID(), role: 'assistant', source: { kind: 'model', provider: 'test', model: 'test' }, content: text(assistantEnvelope(1, '过早状态')) },
   })
+  assert.equal(controller.snapshot(session).classifyingAssistantSeq, firstAssistant.seq)
   ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
   assert.equal(controller.snapshot(session).revision, 0)
 
@@ -295,6 +323,7 @@ test('a tentative stop followed by same-turn steering does not compact early', a
   ctx.emit('agent/status', { agent, status: 'idle' })
   agent.status = 'idle'
   assert.equal(controller.snapshot(session).pending?.summary, '最终状态')
+  assert.equal(controller.snapshot(session).classifyingAssistantSeq, undefined)
   assert.equal(controller.snapshot(session).revision, 0)
   acceptProposal(controller, agent)
   assert.equal(controller.snapshot(session).summary, '最终状态')
@@ -382,7 +411,60 @@ test('pending proposal blocks the next turn and resumes its input after acceptan
   assert.equal(session.surface.nodes.length, 1)
   assert.equal(agent.inbox.nextTurn.length, 1)
   assert.equal(agent.inbox.nextTurn[0].id, nextInput.id)
+  assert.equal(agent.inbox.nextStep.length, 1)
+  assert.equal(agent.inbox.nextStep[0].source.kind, 'summarized-working-memory-wake')
   assert.equal(agent.status, 'running')
+
+  const claimed = [...agent.inbox.nextStep, agent.inbox.nextTurn[0]]
+  agent.inbox.splice('next-step', 0, agent.inbox.nextStep.length, [])
+  agent.inbox.splice('next-turn', 0, 1, [])
+  const resumed = await ctx.waterfall(
+    'agent/pre-step',
+    { agent, messages: claimed, turn: 3, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: claimed }),
+  )
+  assert.equal(resumed.kind, 'enter')
+  assert.equal(resumed.messages.some(message => message.source.kind === 'summarized-working-memory-wake'), false)
+  assert.equal(resumed.messages.some(message => message.id === nextInput.id), true)
+})
+
+test('pending proposal survives a recent-chat limit change without normalization bypass', async () => {
+  const firstContext = new FakeContext()
+  const session = new FakeSession(firstContext)
+  const agent = fakeAgent(session)
+  const first = new SessionMemoryController(firstContext, 3)
+  first.attach()
+  firstContext.emit('agent/created', { agent, source: 'startup' })
+
+  const initial = JSON.stringify({
+    response: '第一轮',
+    summary: '已有三条',
+    recentChats: [1, 2, 3].map(value => ({ user: `问题 ${value}`, assistant: `处理 ${value}` })),
+  })
+  await runTurn(firstContext, session, agent, 1, initial)
+  acceptProposal(first, agent)
+  await runTurn(firstContext, session, agent, 2, assistantEnvelope(2))
+  assert.ok(first.snapshot(session).pending)
+
+  const resumedContext = new FakeContext()
+  session.ctx = resumedContext
+  const resumedAgent = fakeAgent(session)
+  const resumed = new SessionMemoryController(resumedContext, 1)
+  resumed.attach()
+  resumedContext.emit('agent/created', { agent: resumedAgent, source: 'resume' })
+  const restored = resumed.snapshot(session)
+  assert.equal(restored.recentChats.length, 1)
+  assert.ok(restored.pending)
+  assert.equal(restored.pending.recentChats.length, 1)
+
+  const current = user('下一轮不能绕过审核')
+  const decision = await resumedContext.waterfall(
+    'agent/pre-step',
+    { agent: resumedAgent, messages: [current], turn: 3, step: 1, signal: new AbortController().signal },
+    async () => ({ kind: 'enter', messages: [current] }),
+  )
+  assert.deepEqual(decision, { kind: 'reject' })
+  assert.ok(resumed.snapshot(session).pending)
 })
 
 test('a changed recent-chat limit normalizes the persisted surface before the next step', async () => {
